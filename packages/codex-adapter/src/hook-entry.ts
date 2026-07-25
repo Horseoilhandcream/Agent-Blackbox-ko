@@ -149,11 +149,21 @@ function absolute(path: string, cwd: string | undefined): string {
   return isAbsolute(path) ? path : resolve(cwd ?? process.cwd(), path);
 }
 
-function statePath(sessionId: string): string {
+function stateDir(): string {
   // Codex command hooks execute under the active sandbox. Its temporary root
   // is writable even when ~/.local is not, and this state only needs to live
   // for the duration of a resumable session.
-  return join(tmpdir(), "agent-blackbox", "codex-hooks", `${sessionId.replace(/[^A-Za-z0-9_-]/g, "_")}.json`);
+  //
+  // Scope the directory to the current user: on Linux os.tmpdir() is the SHARED
+  // /tmp, so a fixed name lets any other local account pre-create the path and
+  // plant (or read) session state — which we feed straight back into the model's
+  // context. A uid suffix plus 0700 keeps it ours.
+  const uid = typeof process.getuid === "function" ? process.getuid() : process.pid;
+  return join(tmpdir(), `agent-blackbox-${uid}`, "codex-hooks");
+}
+
+function statePath(sessionId: string): string {
+  return join(stateDir(), `${sessionId.replace(/[^A-Za-z0-9_-]/g, "_")}.json`);
 }
 
 function emptyState(): HookState {
@@ -179,7 +189,7 @@ function mutate(sessionId: string, fn: (state: HookState) => void): void {
   fn(state);
   const target = statePath(sessionId);
   try {
-    mkdirSync(join(target, ".."), { recursive: true });
+    mkdirSync(stateDir(), { recursive: true, mode: 0o700 });
     const temp = `${target}.${process.pid}.tmp`;
     writeFileSync(temp, JSON.stringify(state), "utf8");
     renameSync(temp, target);

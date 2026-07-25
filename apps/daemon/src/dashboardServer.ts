@@ -1,7 +1,7 @@
 import { createReadStream } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
-import { extname, join, normalize } from "node:path";
+import { extname, join, normalize, resolve, sep } from "node:path";
 
 export type DashboardServerOptions = {
   distDir: string;
@@ -31,7 +31,10 @@ const mimeTypes: Record<string, string> = {
 // Serve the pre-built dashboard as static files, injecting the daemon URL at
 // runtime so a single `up` command works on any port without rebuilding.
 export async function startDashboardServer(options: DashboardServerOptions): Promise<RunningDashboardServer> {
-  const indexPath = join(options.distDir, "index.html");
+  // Absolute + normalized once, so the containment check below compares like with
+  // like no matter how the caller spelled distDir.
+  const distDir = resolve(options.distDir);
+  const indexPath = join(distDir, "index.html");
   let indexHtml: string;
   try {
     indexHtml = await readFile(indexPath, "utf8");
@@ -58,8 +61,11 @@ export async function startDashboardServer(options: DashboardServerOptions): Pro
       return;
     }
     const safePath = normalize(rawPath).replace(/^(\.\.[/\\])+/, "");
-    const filePath = join(options.distDir, safePath);
-    if (!filePath.startsWith(options.distDir)) {
+    const filePath = join(distDir, safePath);
+    // Containment must compare on a path BOUNDARY: a bare startsWith also accepts a
+    // sibling directory that merely shares the prefix (".../dist" vs ".../dist-x"),
+    // so require the separator (or an exact match on the root itself).
+    if (filePath !== distDir && !filePath.startsWith(distDir + sep)) {
       response.writeHead(403);
       response.end("Forbidden");
       return;

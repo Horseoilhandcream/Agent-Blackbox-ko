@@ -1,7 +1,8 @@
 import { hasAbbCodexHooks, mergeAbbCodexHooks, removeAbbCodexHooks, type CodexHooksConfig } from "@agent-blackbox/codex-adapter";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
+import { writeFileAtomic } from "./atomicWrite.js";
 
 export function globalCodexDir(): string {
   const override = process.env.CODEX_HOME;
@@ -17,8 +18,8 @@ export async function installCodexHooks(options: { hookEntryPath: string }): Pro
   const config = await readConfig(hooksPath);
   const invocation = `node ${JSON.stringify(options.hookEntryPath)}`;
   const next = mergeAbbCodexHooks(config, invocation);
-  await mkdir(dirname(hooksPath), { recursive: true });
-  await writeFile(hooksPath, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+  // Atomic: hooks.json is the user's own global Codex config (see initClaudeHooks).
+  await writeFileAtomic(hooksPath, `${JSON.stringify(next, null, 2)}\n`);
   return { hooksPath };
 }
 
@@ -32,7 +33,7 @@ export async function uninstallCodexHooks(): Promise<{ hooksPath: string; remove
     throw error;
   }
   if (!hasAbbCodexHooks(config)) return { hooksPath, removed: false };
-  await writeFile(hooksPath, `${JSON.stringify(removeAbbCodexHooks(config), null, 2)}\n`, "utf8");
+  await writeFileAtomic(hooksPath, `${JSON.stringify(removeAbbCodexHooks(config), null, 2)}\n`);
   return { hooksPath, removed: true };
 }
 

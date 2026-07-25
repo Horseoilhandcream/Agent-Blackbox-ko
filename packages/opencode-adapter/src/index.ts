@@ -11,10 +11,13 @@ import {
 import {
   buildWorkingSetBlock,
   decideReadServe,
+  evictColdestFile,
   hashContent,
   isReadTool,
   isReusableCommand,
   readArgPath,
+  rememberRead,
+  WORKING_SET_MAX_COMMANDS,
   type ReadCacheEntry,
   type WorkingSetFile
 } from "./optimize.js";
@@ -132,6 +135,7 @@ function createOpenCodeEventFactory(options: {
     else f.edits += 1;
     if (hash) f.hash = hash;
     wsFiles.set(path, f);
+    evictColdestFile(wsFiles); // bounded: only the 8 hottest are ever rendered anyway
   };
   const optimizeReadAfter = (input: Record<string, unknown>, output: Record<string, unknown>): void => {
     const tool = input.tool;
@@ -141,7 +145,7 @@ function createOpenCodeEventFactory(options: {
       const command = readString(input.args, "command");
       const exit = readExitCode(output);
       if (command && isReusableCommand(command) && (exit === 0 || exit === undefined)) {
-        if (!wsCommands.includes(command)) wsCommands.push(command);
+        if (!wsCommands.includes(command) && wsCommands.length < WORKING_SET_MAX_COMMANDS) wsCommands.push(command);
       }
     }
     if (!isReadTool(tool) || !path) return;
@@ -158,7 +162,7 @@ function createOpenCodeEventFactory(options: {
     const key = `${readString(input, "sessionID") ?? "s"}::${path}::${offset}:${limit}`;
     const hash = hashContent(current);
     const decision = decideReadServe(readCache.get(key), { hash, content: current }, compactionGen, path);
-    readCache.set(key, { hash, content: current, gen: compactionGen });
+    rememberRead(readCache, key, { hash, content: current, gen: compactionGen });
     bumpFile(path, "read", hash);
     if (decision.mode !== "full" && typeof decision.output === "string" && decision.saved > 0) {
       output.output = decision.output; // serve no-op/diff instead of full bytes

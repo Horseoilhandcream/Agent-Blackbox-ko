@@ -1,6 +1,7 @@
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
+import { writeFileAtomic } from "./atomicWrite.js";
 
 export type InitOpenCodeOptions = {
   projectDir: string;
@@ -61,8 +62,9 @@ export async function installGlobalRecorder(options: {
   }
   const pluginPath = globalRecorderPath();
   const bundle = (await readFile(options.pluginBundlePath, "utf8")).replaceAll("__ABB_DAEMON_URL__", options.daemonUrl);
-  await mkdir(dirname(pluginPath), { recursive: true });
-  await writeFile(pluginPath, bundle, "utf8");
+  // Atomic: OpenCode auto-loads every file in this directory, so a half-written
+  // plugin would be imported by the user's very next session and throw on parse.
+  await writeFileAtomic(pluginPath, bundle);
   return { pluginPath };
 }
 
@@ -95,11 +97,11 @@ export async function initOpenCodeProject(options: InitOpenCodeOptions): Promise
   if (options.pluginBundlePath && (await pathExists(options.pluginBundlePath))) {
     const bundle = await readFile(options.pluginBundlePath, "utf8");
     const inlined = bundle.replaceAll("__ABB_DAEMON_URL__", daemonUrl);
-    await writeFile(pluginPath, inlined, "utf8");
+    await writeFileAtomic(pluginPath, inlined);
     return { pluginPath, packageJsonPath, adapterPackage, adapterImport };
   }
 
-  await writeFile(pluginPath, renderOpenCodePlugin({ adapterImport, daemonUrl, optimize: options.optimize ?? false }), "utf8");
+  await writeFileAtomic(pluginPath, renderOpenCodePlugin({ adapterImport, daemonUrl, optimize: options.optimize ?? false }));
   await writePackageJson(packageJsonPath, adapterPackage, adapterImport);
   return {
     pluginPath,
@@ -124,11 +126,8 @@ async function writePackageJson(packageJsonPath: string, adapterPackage: string,
     ...(existing.dependencies ?? {}),
     [adapterImport]: adapterPackage
   };
-  await writeFile(
-    packageJsonPath,
-    `${JSON.stringify({ ...existing, dependencies }, null, 2)}\n`,
-    "utf8"
-  );
+  // Atomic: this merges into a package.json the project may already own.
+  await writeFileAtomic(packageJsonPath, `${JSON.stringify({ ...existing, dependencies }, null, 2)}\n`);
 }
 
 function inferAdapterImport(adapterPackage: string): string {
@@ -154,12 +153,14 @@ async function readPackageJson(packageJsonPath: string): Promise<PackageJson> {
   }
 }
 
+// stat, not readFile: this only asks "is it there?", and the bundle it is asked
+// about is a multi-hundred-KB file that would otherwise be read twice.
 async function pathExists(path: string): Promise<boolean> {
   try {
-    await readFile(path, "utf8");
+    await stat(path);
     return true;
   } catch (error) {
-    if (isNodeError(error) && error.code === "ENOENT") {
+    if (isNodeError(error) && (error.code === "ENOENT" || error.code === "ENOTDIR")) {
       return false;
     }
     throw error;

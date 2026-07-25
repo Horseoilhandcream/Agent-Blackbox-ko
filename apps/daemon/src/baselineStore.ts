@@ -6,8 +6,9 @@ import {
   type RunSummary,
   type TraceEvent
 } from "@agent-blackbox/core";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { writeFileAtomic } from "./atomicWrite.js";
 
 // Daemon-side persistence for relative baselines. Holds the per-archetype run
 // history in memory (loaded once), records the recent runs' summaries on a
@@ -61,12 +62,8 @@ async function ensureLoaded(eventsFile: string): Promise<StoreState> {
 }
 
 async function flush(eventsFile: string, state: StoreState): Promise<void> {
-  const path = baselinePath(eventsFile);
   try {
-    await mkdir(dirname(path), { recursive: true });
-    const tmp = `${path}.${process.pid}.tmp`;
-    await writeFile(tmp, `${JSON.stringify({ history: state.history }, null, 2)}\n`, "utf8");
-    await rename(tmp, path);
+    await writeFileAtomic(baselinePath(eventsFile), `${JSON.stringify({ history: state.history }, null, 2)}\n`);
   } catch {
     // best-effort: a failed flush just means we re-record next interval
   }

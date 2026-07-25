@@ -11,8 +11,9 @@ import {
   type EfficiencyProfile,
   type TraceEvent
 } from "@agent-blackbox/core";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
+import { writeFileAtomic } from "./atomicWrite.js";
 import { loadTraceEvents } from "./server.js";
 
 // The actuator half of the loop: ABB stops at advice today; `optimize` turns the
@@ -345,16 +346,6 @@ async function readProfile(path: string): Promise<EfficiencyProfile> {
 
 async function writeProfile(path: string, profile: EfficiencyProfile): Promise<void> {
   await writeFileAtomic(path, `${JSON.stringify(profile, null, 2)}\n`);
-}
-
-// Crash-safe write: a kill/power-loss/ENOSPC mid-write leaves the original intact
-// (the temp file is incomplete, the rename never runs) instead of truncating a file
-// that legitimately holds the user's own notes above our managed block.
-async function writeFileAtomic(path: string, content: string): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
-  const tmp = `${path}.${process.pid}.tmp`;
-  await writeFile(tmp, content, "utf8");
-  await rename(tmp, path);
 }
 
 // Serialize write operations per path via a promise chain (mirrors storage's

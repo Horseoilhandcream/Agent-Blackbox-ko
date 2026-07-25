@@ -79,10 +79,53 @@ export function decideReadServe(
   return { mode: "full", saved: 0 };
 }
 
+export type WorkingSetFile = { path: string; reads: number; edits: number; hash?: string };
+
+// The actuator's state lives inside the user's OpenCode process for as long as the
+// session does, and the read cache holds WHOLE FILE CONTENTS. Unbounded, a long
+// session that touches many (or large) files would grow that process's heap until
+// it dies — an observability add-on must never do that. Everything here is capped;
+// evicting only ever costs a missed dedup, and the next read is served in full.
+export const READ_CACHE_MAX_ENTRIES = 64;
+export const READ_CACHE_MAX_CONTENT_BYTES = 512 * 1024;
+export const WORKING_SET_MAX_FILES = 200;
+export const WORKING_SET_MAX_COMMANDS = 20;
+
+/**
+ * Record the bytes last served for a read, keeping the cache bounded. A Map
+ * iterates in insertion order, so deleting before setting makes the oldest key the
+ * least-recently-served one — a plain LRU. Contents past
+ * READ_CACHE_MAX_CONTENT_BYTES aren't cached at all: one huge file could otherwise
+ * outweigh the whole rest of the budget.
+ */
+export function rememberRead(cache: Map<string, ReadCacheEntry>, key: string, entry: ReadCacheEntry): void {
+  cache.delete(key);
+  if (entry.content.length > READ_CACHE_MAX_CONTENT_BYTES) return;
+  cache.set(key, entry);
+  while (cache.size > READ_CACHE_MAX_ENTRIES) {
+    const oldest = cache.keys().next();
+    if (oldest.done) break;
+    cache.delete(oldest.value);
+  }
+}
+
+/** Drop the least-touched file once the working set is full, so it stays bounded. */
+export function evictColdestFile(files: Map<string, WorkingSetFile>): void {
+  if (files.size <= WORKING_SET_MAX_FILES) return;
+  let coldestPath: string | undefined;
+  let coldestTouches = Number.POSITIVE_INFINITY;
+  for (const [path, file] of files) {
+    const touches = file.reads + file.edits;
+    if (touches < coldestTouches) {
+      coldestTouches = touches;
+      coldestPath = path;
+    }
+  }
+  if (coldestPath !== undefined) files.delete(coldestPath);
+}
+
 export const WORKING_SET_START = "⟨agent-blackbox:working-set⟩";
 export const WORKING_SET_END = "⟨/agent-blackbox:working-set⟩";
-
-export type WorkingSetFile = { path: string; reads: number; edits: number; hash?: string };
 
 // Compact recall layer injected into the system prompt (kept tiny — every line is
 // context the run must carry). Returns null when there's nothing worth pinning.

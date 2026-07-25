@@ -4,12 +4,19 @@ import {
   buildWorkingSetBlock,
   computeReadDelta,
   decideReadServe,
+  evictColdestFile,
   hashContent,
   isReadTool,
   isReusableCommand,
+  READ_CACHE_MAX_CONTENT_BYTES,
+  READ_CACHE_MAX_ENTRIES,
   readArgPath,
+  rememberRead,
   WORKING_SET_END,
-  WORKING_SET_START
+  WORKING_SET_MAX_FILES,
+  WORKING_SET_START,
+  type ReadCacheEntry,
+  type WorkingSetFile
 } from "./optimize.js";
 
 const entry = (content: string, gen: number) => ({ hash: hashContent(content), content, gen });
@@ -74,5 +81,56 @@ describe("in-run optimizer", () => {
     expect(readArgPath({ path: "b.ts" })).toBe("b.ts");
     expect(isReusableCommand("node test.js")).toBe(true);
     expect(isReusableCommand("ls -la")).toBe(false);
+  });
+});
+
+// The recorder runs inside the user's long-lived OpenCode process, so these caches
+// must not grow with the session — see the bounds in optimize.ts.
+describe("bounded actuator state", () => {
+  it("evicts the least-recently-served read once the cache is full", () => {
+    const cache = new Map<string, ReadCacheEntry>();
+    for (let i = 0; i < READ_CACHE_MAX_ENTRIES + 10; i += 1) {
+      rememberRead(cache, `k${i}`, entry(`body ${i}`, 0));
+    }
+    expect(cache.size).toBe(READ_CACHE_MAX_ENTRIES);
+    expect(cache.has("k0")).toBe(false); // oldest dropped
+    expect(cache.has(`k${READ_CACHE_MAX_ENTRIES + 9}`)).toBe(true); // newest kept
+  });
+
+  it("re-serving a key refreshes its recency instead of duplicating it", () => {
+    const cache = new Map<string, ReadCacheEntry>();
+    rememberRead(cache, "hot", entry("v1", 0));
+    for (let i = 0; i < READ_CACHE_MAX_ENTRIES - 1; i += 1) rememberRead(cache, `k${i}`, entry(`b${i}`, 0));
+    rememberRead(cache, "hot", entry("v2", 0)); // touched again → newest
+    rememberRead(cache, "overflow", entry("b", 0));
+
+    expect(cache.size).toBe(READ_CACHE_MAX_ENTRIES);
+    expect(cache.get("hot")?.content).toBe("v2");
+    expect(cache.has("k0")).toBe(false); // the cold one went instead
+  });
+
+  it("never caches a file larger than the per-entry ceiling", () => {
+    const cache = new Map<string, ReadCacheEntry>();
+    const huge = "x".repeat(READ_CACHE_MAX_CONTENT_BYTES + 1);
+    rememberRead(cache, "huge.bin", entry(huge, 0));
+    expect(cache.size).toBe(0);
+  });
+
+  it("drops a previously cached entry when its file grows past the ceiling", () => {
+    const cache = new Map<string, ReadCacheEntry>();
+    rememberRead(cache, "grows.log", entry("small", 0));
+    rememberRead(cache, "grows.log", entry("x".repeat(READ_CACHE_MAX_CONTENT_BYTES + 1), 0));
+    expect(cache.has("grows.log")).toBe(false); // stale bytes must not linger
+  });
+
+  it("caps the working set by dropping the least-touched file", () => {
+    const files = new Map<string, WorkingSetFile>();
+    files.set("hot.ts", { path: "hot.ts", reads: 9, edits: 3 });
+    for (let i = 0; i < WORKING_SET_MAX_FILES; i += 1) {
+      files.set(`f${i}.ts`, { path: `f${i}.ts`, reads: 2, edits: 0 });
+      evictColdestFile(files);
+    }
+    expect(files.size).toBe(WORKING_SET_MAX_FILES);
+    expect(files.has("hot.ts")).toBe(true);
   });
 });

@@ -242,7 +242,10 @@ export async function loadRecentTraceEvents(eventsFile: string, cap = SNAPSHOT_E
           pos += bytesRead;
           cache.buffer += cache.decoder.write(chunk.subarray(0, bytesRead));
         }
-        cache.offset = size;
+        // `pos`, not `size`: a short read breaks the loop early, and claiming we
+        // consumed up to `size` would skip those bytes permanently — the next poll
+        // starts past events that were never parsed. Resume from what we actually read.
+        cache.offset = pos;
       } finally {
         await handle.close();
       }

@@ -1,7 +1,8 @@
 import { hasAbbHooks, mergeAbbHooks, removeAbbHooks, type Settings } from "@agent-blackbox/claude-code-adapter";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
+import { writeFileAtomic } from "./atomicWrite.js";
 
 // Claude Code's global config dir (respects CLAUDE_CONFIG_DIR), where settings.json
 // — and thus the hooks that fire for every session — lives.
@@ -23,8 +24,9 @@ export async function installClaudeCodeHooks(options: { hookEntryPath: string })
   const settingsPath = claudeSettingsPath();
   const settings = await readSettings(settingsPath);
   const next = mergeAbbHooks(settings, `node ${options.hookEntryPath}`);
-  await mkdir(dirname(settingsPath), { recursive: true });
-  await writeFile(settingsPath, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+  // Atomic: settings.json is the user's own global Claude Code config. An
+  // interrupted truncate-and-write would leave it empty and break every session.
+  await writeFileAtomic(settingsPath, `${JSON.stringify(next, null, 2)}\n`);
   return { settingsPath };
 }
 
@@ -38,7 +40,7 @@ export async function uninstallClaudeCodeHooks(): Promise<{ settingsPath: string
     throw error;
   }
   if (!hasAbbHooks(settings)) return { settingsPath, removed: false };
-  await writeFile(settingsPath, `${JSON.stringify(removeAbbHooks(settings), null, 2)}\n`, "utf8");
+  await writeFileAtomic(settingsPath, `${JSON.stringify(removeAbbHooks(settings), null, 2)}\n`);
   return { settingsPath, removed: true };
 }
 

@@ -471,10 +471,17 @@ export function createAgentTreeLayout(steps: WorkflowStep[]): AgentTreeLayout {
   };
 }
 
+// One linear pass instead of copy + filter + sort. This runs once per branch lane
+// while laying out the map, and the layout is recomputed on every streamed snapshot —
+// so on a long multi-agent run the old version re-sorted the whole step list dozens
+// of times per update. Ties keep the earliest step, matching the stable sort it replaces.
 function latestStepBefore(steps: WorkflowStep[], seq: number, excludedAgentLabel: string | undefined): WorkflowStep | undefined {
-  return [...steps]
-    .filter((step) => step.seq <= seq && step.agentLabel !== excludedAgentLabel)
-    .sort((a, b) => b.seq - a.seq)[0];
+  let latest: WorkflowStep | undefined;
+  for (const step of steps) {
+    if (step.seq > seq || step.agentLabel === excludedAgentLabel) continue;
+    if (!latest || step.seq > latest.seq) latest = step;
+  }
+  return latest;
 }
 
 function laneStartSeq(lane: AgentTreeLane): number {
