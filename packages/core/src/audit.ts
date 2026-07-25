@@ -18,13 +18,15 @@ type ClaimRule = {
   severity: PromiseCheckSeverity;
 };
 
+const TEST_COMMAND = /\b(test|check|vitest|pytest|cargo test|npm test)\b/i;
+
 const claimRules: ClaimRule[] = [
   {
     name: "tests-run",
     pattern: /\b(?:ran|run|running|executed)\s+(?:the\s+)?(?:tests?|test suite|checks?)\b/i,
     verifier: (events) =>
       events
-        .filter((event) => event.kind === "bash" && stringPayload(event, "command")?.match(/\b(test|check|vitest|pytest|cargo test|npm test)\b/i))
+        .filter((event) => event.kind === "bash" && TEST_COMMAND.test(stringPayload(event, "command") ?? ""))
         .map((event) => event.id),
     severity: "warning"
   },
@@ -45,13 +47,26 @@ const claimRules: ClaimRule[] = [
 export function evaluatePromiseChecks(events: TraceEvent[]): PromiseCheck[] {
   const messageEvents = events.filter((event) => event.kind === "message" && event.evidence.claimedByModel);
   const checks: PromiseCheck[] = [];
+  // A rule's evidence depends only on the events, not on which message made the
+  // claim — so resolve it at most once per rule instead of re-scanning the whole
+  // event list for every claiming message. This runs on every snapshot, in the
+  // daemon AND on the dashboard's render thread, so on a long run the repeated
+  // scans (messages × rules × events) were the expensive part of the check.
+  const evidenceByRule = new Map<string, string[]>();
+  const evidenceFor = (rule: ClaimRule): string[] => {
+    const cached = evidenceByRule.get(rule.name);
+    if (cached) return cached;
+    const resolved = rule.verifier(events);
+    evidenceByRule.set(rule.name, resolved);
+    return resolved;
+  };
   for (const message of messageEvents) {
     const text = stringPayload(message, "text") ?? stringPayload(message, "content") ?? "";
     for (const rule of claimRules) {
       if (!rule.pattern.test(text)) {
         continue;
       }
-      const evidenceEventIds = rule.verifier(events);
+      const evidenceEventIds = evidenceFor(rule);
       checks.push({
         claim: `${rule.name}: ${shorten(text)}`,
         status: evidenceEventIds.length > 0 ? "verified" : "unverified",

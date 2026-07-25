@@ -20,6 +20,30 @@ type MutableContext = {
   agentLabel?: string;
 };
 
+// The pairing state below lives as long as the daemon tails the rollout, and a
+// stored call holds its FULL input (an apply_patch body, a command line). Calls
+// whose output never arrives — and the id sets that mark structured exec/patch
+// events — would otherwise grow for the whole session, so every one is bounded.
+// Falling out of the window only means a call is treated as unstructured again.
+const MAX_PENDING_TOOL_CALLS = 128;
+const MAX_TRACKED_CALL_IDS = 512;
+
+function boundMap<K, V>(map: Map<K, V>, max: number): void {
+  while (map.size > max) {
+    const oldest = map.keys().next();
+    if (oldest.done) break;
+    map.delete(oldest.value);
+  }
+}
+
+function boundSet<T>(set: Set<T>, max: number): void {
+  while (set.size > max) {
+    const oldest = set.values().next();
+    if (oldest.done) break;
+    set.delete(oldest.value);
+  }
+}
+
 /**
  * Stateful normalizer for Codex rollout JSONL. Structured event_msg records are
  * preferred; response_item tool calls are the fallback used by code-mode/app
@@ -202,7 +226,10 @@ function consumeResponseItem(
   if (type === "function_call" || type === "custom_tool_call") {
     const callId = readString(payload, ["call_id"]);
     const call = parseToolCall(payload);
-    if (callId) toolCalls.set(callId, call);
+    if (callId) {
+      toolCalls.set(callId, call);
+      boundMap(toolCalls, MAX_PENDING_TOOL_CALLS);
+    }
     if (callId && structuredExecCalls.has(callId)) return [];
     return [
       mkInput(line, ctx, state, {
@@ -265,12 +292,16 @@ function consumeExecBegin(
       structuredExecCalls.add(callId);
       toolCalls.set(callId, call);
     }
+    boundSet(structuredExecCalls, MAX_TRACKED_CALL_IDS);
+    boundMap(toolCalls, MAX_PENDING_TOOL_CALLS);
     return [];
   }
 
   if (callId) {
     structuredExecCalls.add(callId);
     toolCalls.set(callId, call);
+    boundSet(structuredExecCalls, MAX_TRACKED_CALL_IDS);
+    boundMap(toolCalls, MAX_PENDING_TOOL_CALLS);
   }
   return [mkInput(line, ctx, state, { kind: "tool_call", summary: "tool.call:bash", payload: { tool: "bash", ...(callId ? { callID: callId } : {}) } })];
 }
@@ -284,7 +315,10 @@ function consumeExecEnd(
   structuredExecCalls: Set<string>
 ): TraceEventInput[] {
   const callId = readString(payload, ["call_id"]);
-  if (callId) structuredExecCalls.add(callId);
+  if (callId) {
+    structuredExecCalls.add(callId);
+    boundSet(structuredExecCalls, MAX_TRACKED_CALL_IDS);
+  }
   const stored = callId ? toolCalls.get(callId) : undefined;
   if (callId) toolCalls.delete(callId);
   const command = readString(stored?.input ?? {}, ["command"]) ?? commandFromPayload(payload);
@@ -361,7 +395,10 @@ function consumePatchEnd(
   toolCalls: Map<string, ToolCall>
 ): TraceEventInput[] {
   const callId = readString(payload, ["call_id"]);
-  if (callId) structuredPatchCalls.add(callId);
+  if (callId) {
+    structuredPatchCalls.add(callId);
+    boundSet(structuredPatchCalls, MAX_TRACKED_CALL_IDS);
+  }
   // Codex code mode currently gives the outer custom tool call and the inner
   // patch event different IDs. Mark any in-flight patch fallback as covered by
   // this richer structured event so the edit appears exactly once.

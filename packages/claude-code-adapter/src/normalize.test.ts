@@ -218,4 +218,30 @@ describe("createClaudeNormalizer", () => {
     const quiet = n.consume({ type: "system", subtype: "stop_hook_summary", preventedContinuation: false, hookErrors: [], sessionId: "S1" });
     expect(quiet).toHaveLength(0);
   });
+
+  // The daemon holds one normalizer per transcript for its whole lifetime, and a
+  // stored call keeps its full input (a Write's file body). See MAX_PENDING_TOOL_CALLS.
+  it("forgets a tool call once its result is paired, so the map can't grow with the session", () => {
+    const n = createClaudeNormalizer(ctx());
+    n.consume(assistant([{ type: "tool_use", id: "tu1", name: "Read", input: { file_path: "/proj/a.ts" } }]));
+    const first = n.consume(userResult("tu1", "abcde", { type: "text", file: { filePath: "/proj/a.ts", content: "abcde" } }));
+    expect(first.find((e) => e.kind === "file_read")).toBeDefined();
+
+    // Same id again: the call was consumed, so there is nothing left to pair with.
+    const replay = n.consume(userResult("tu1", "abcde", { type: "text", file: { filePath: "/proj/a.ts", content: "abcde" } }));
+    expect(replay.find((e) => e.kind === "file_read")).toBeUndefined();
+  });
+
+  it("caps unmatched tool calls instead of retaining every one forever", () => {
+    const n = createClaudeNormalizer(ctx());
+    n.consume(assistant([{ type: "tool_use", id: "old", name: "Write", input: { file_path: "/proj/old.ts", content: "x".repeat(1000) } }]));
+    for (let i = 0; i < 200; i += 1) {
+      n.consume(assistant([{ type: "tool_use", id: `pending-${i}`, name: "Read", input: { file_path: `/proj/f${i}.ts` } }]));
+    }
+    // The oldest unanswered call has been evicted...
+    expect(n.consume(userResult("old", "x", { type: "text" })).find((e) => e.kind === "file_created")).toBeUndefined();
+    // ...while a recent one still pairs normally.
+    const recent = n.consume(userResult("pending-199", "abc", { type: "text", file: { filePath: "/proj/f199.ts", content: "abc" } }));
+    expect(recent.find((e) => e.kind === "file_read")?.payload).toMatchObject({ path: "/proj/f199.ts" });
+  });
 });

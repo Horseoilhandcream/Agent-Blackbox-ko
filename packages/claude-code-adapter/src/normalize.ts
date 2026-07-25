@@ -30,6 +30,28 @@ const TEAM_TOOLS = new Set(["sendmessage", "teamcreate", "teamdelete", "remotetr
  * `tool_result` block + structured `toolUseResult`), so we hold a tool_use_id →
  * {name,input} map across lines, plus the last model for switch detection.
  */
+// A tool_use is answered by the tool_result that follows it, so the pairing map
+// only ever needs a short window — but it holds each call's FULL input (a Write's
+// file content, an Edit's replacement text) and the normalizer lives as long as the
+// daemon tails the transcript. Calls whose result we never see (interrupted turns,
+// a transcript tailed from the middle) would pile up in the daemon's heap forever,
+// so entries are dropped once matched and the map is capped well above any
+// realistic number of in-flight calls.
+const MAX_PENDING_TOOL_CALLS = 128;
+
+function rememberToolCall(
+  toolUses: Map<string, { name: string; input: JsonObject }>,
+  id: string,
+  call: { name: string; input: JsonObject }
+): void {
+  toolUses.set(id, call);
+  while (toolUses.size > MAX_PENDING_TOOL_CALLS) {
+    const oldest = toolUses.keys().next();
+    if (oldest.done) break;
+    toolUses.delete(oldest.value);
+  }
+}
+
 export function createClaudeNormalizer(ctx: ClaudeNormalizerContext) {
   const toolUses = new Map<string, { name: string; input: JsonObject }>();
   let lastModel: string | undefined;
@@ -99,7 +121,7 @@ function consumeAssistant(
     const id = readString(b, ["id"]);
     const name = readString(b, ["name"]) ?? "unknown-tool";
     const input = asJsonObject(b.input);
-    if (id) toolUses.set(id, { name, input });
+    if (id) rememberToolCall(toolUses, id, { name, input });
     events.push(
       mkInput(line, ctx, {
         kind: "tool_call",
@@ -142,6 +164,7 @@ function consumeUser(
     const id = readString(b, ["tool_use_id"]);
     const call = id ? toolUses.get(id) : undefined;
     if (!call) continue;
+    if (id) toolUses.delete(id); // matched — its input is no longer needed
     const observed = deriveObserved(call.name, call.input, b, toolUseResult, line, ctx);
     if (observed) events.push(observed);
   }

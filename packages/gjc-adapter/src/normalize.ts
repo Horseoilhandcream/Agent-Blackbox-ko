@@ -16,6 +16,28 @@ const SUBAGENT_TOOLS = new Set(["task", "agent"]);
 const TODO_TOOLS = new Set(["todo_write", "todowrite", "taskcreate", "taskupdate", "taskstop"]);
 const COMMAND_TOOLS = new Set(["skill"]);
 
+// A tool call is answered by the tool result that follows it, so the pairing map
+// only ever needs a short window — but it holds each call's FULL input (a write's
+// file content, an edit's replacement text) and the normalizer lives as long as the
+// daemon tails the session. Calls whose result we never see (interrupted turns, a
+// session tailed from the middle) would pile up in the daemon's heap forever, so
+// entries are dropped once matched and the map is capped well above any realistic
+// number of in-flight calls.
+const MAX_PENDING_TOOL_CALLS = 128;
+
+function rememberToolCall(
+  toolUses: Map<string, { name: string; input: JsonObject }>,
+  id: string,
+  call: { name: string; input: JsonObject }
+): void {
+  toolUses.set(id, call);
+  while (toolUses.size > MAX_PENDING_TOOL_CALLS) {
+    const oldest = toolUses.keys().next();
+    if (oldest.done) break;
+    toolUses.delete(oldest.value);
+  }
+}
+
 export function createGjcNormalizer(ctx: GjcNormalizerContext) {
   const toolUses = new Map<string, { name: string; input: JsonObject }>();
   let lastModel: string | undefined;
@@ -90,12 +112,13 @@ function consumeMessage(line: UnknownRecord, ctx: GjcNormalizerContext, toolUses
       const id = readString(b, ["id", "toolCallId", "callID"]);
       const name = readString(b, ["name", "toolName"]) ?? "unknown-tool";
       const input = asJsonObject(b.arguments ?? b.input);
-      if (id) toolUses.set(id, { name, input });
+      if (id) rememberToolCall(toolUses, id, { name, input });
       events.push(mkInput(line, ctx, { kind: "tool_call", summary: `tool.call:${prettyTool(name)}`, payload: { tool: name, ...(id ? { callID: id } : {}) } }));
     }
     if (blockType === "toolResult" || blockType === "tool_result") {
       const id = readString(b, ["toolCallId", "tool_use_id", "id"]);
       const call = id ? toolUses.get(id) : undefined;
+      if (id && call) toolUses.delete(id); // matched — its input is no longer needed
       const result = call ? deriveObserved(call.name, call.input, b, line, ctx) : undefined;
       if (result) events.push(result);
     }
@@ -116,13 +139,14 @@ function consumeDirectToolCall(line: UnknownRecord, ctx: GjcNormalizerContext, t
   const id = readString(line, ["id", "toolCallId", "callID"]);
   const name = readString(line, ["name", "toolName"]) ?? "unknown-tool";
   const input = asJsonObject(line.arguments ?? line.input);
-  if (id) toolUses.set(id, { name, input });
+  if (id) rememberToolCall(toolUses, id, { name, input });
   return [mkInput(line, ctx, { kind: "tool_call", summary: `tool.call:${prettyTool(name)}`, payload: { tool: name, ...(id ? { callID: id } : {}) } })];
 }
 
 function consumeDirectToolResult(line: UnknownRecord, ctx: GjcNormalizerContext, toolUses: Map<string, { name: string; input: JsonObject }>): TraceEventInput[] {
   const id = readString(line, ["toolCallId", "tool_use_id", "id"]);
   const call = id ? toolUses.get(id) : undefined;
+  if (id && call) toolUses.delete(id); // matched — its input is no longer needed
   const name = call?.name ?? readString(line, ["name", "toolName"]);
   if (!name) return [];
   const input = call?.input ?? asJsonObject(line.arguments ?? line.input);

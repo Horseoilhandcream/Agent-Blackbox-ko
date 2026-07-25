@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { computeEfficiencyReport } from "./efficiency.js";
 import { createTraceEvent } from "./events.js";
-import { accrueProfile, buildAccumulatedMemory, emptyProfile } from "./efficiencyProfile.js";
+import { accrueProfile, buildAccumulatedMemory, emptyProfile, isEfficiencyProfile } from "./efficiencyProfile.js";
 
 const ev = (seq: number, kind: Parameters<typeof createTraceEvent>[1]["kind"], payload: Record<string, unknown>) =>
   createTraceEvent(seq, { host: "claude-code", runId: "r", sessionId: "s", kind, payload: payload as never });
@@ -57,5 +57,17 @@ describe("accrueProfile", () => {
 
   it("returns null block for a profile with nothing pinned", () => {
     expect(buildAccumulatedMemory(emptyProfile())).toBeNull();
+  });
+});
+
+describe("profile validation", () => {
+  it("rejects a profile whose items are malformed, so nothing garbled reaches the memory file", () => {
+    const base = emptyProfile();
+    expect(isEfficiencyProfile(base)).toBe(true);
+    expect(isEfficiencyProfile({ ...base, reread: [{ label: "a.ts", weight: 1, count: 1 }] })).toBe(true);
+    expect(isEfficiencyProfile({ ...base, reread: [{ weight: 1, count: 1 }] })).toBe(false); // no label
+    expect(isEfficiencyProfile({ ...base, reread: [{ label: "a.ts", weight: null, count: 1 }] })).toBe(false);
+    expect(isEfficiencyProfile({ ...base, reread: ["a.ts"] })).toBe(false);
+    expect(isEfficiencyProfile({ ...base, seenRuns: [42] })).toBe(false);
   });
 });

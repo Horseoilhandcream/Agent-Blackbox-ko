@@ -129,14 +129,28 @@ export function buildAccumulatedMemory(profile: EfficiencyProfile): string | nul
   );
 }
 
+const isProfileItem = (v: unknown): v is ProfileItem => {
+  if (typeof v !== "object" || v === null) return false;
+  const i = v as Partial<ProfileItem>;
+  return typeof i.label === "string" && Number.isFinite(i.weight) && Number.isFinite(i.count);
+};
+
 // Validate a parsed profile from disk (best-effort; bad shape → fall back to empty).
+// Items are checked individually, not just the list shape: this profile is rendered
+// straight into the user's AGENTS.md/CLAUDE.md, so a truncated or hand-edited entry
+// must fall back to an empty profile rather than write "undefined (×NaN)" into the
+// file their agent reads on every run.
 export function isEfficiencyProfile(v: unknown): v is EfficiencyProfile {
   if (typeof v !== "object" || v === null) return false;
   const p = v as Partial<EfficiencyProfile>;
   return (
-    LIST_KEYS.every((k) => Array.isArray((p as Record<string, unknown>)[k])) &&
+    LIST_KEYS.every((k) => {
+      const list = (p as Record<string, unknown>)[k];
+      return Array.isArray(list) && list.every(isProfileItem);
+    }) &&
     typeof p.flags === "object" &&
     p.flags !== null &&
-    Array.isArray(p.seenRuns)
+    Array.isArray(p.seenRuns) &&
+    p.seenRuns.every((r) => typeof r === "string")
   );
 }
