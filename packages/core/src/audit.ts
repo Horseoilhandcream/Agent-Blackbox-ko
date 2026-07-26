@@ -1,4 +1,5 @@
 import type { TraceEvent } from "./events.js";
+import { firstUserPrompt } from "./prompt.js";
 import type { WorkflowGraph, WorkflowNode } from "./graph.js";
 
 export type PromiseCheckStatus = "verified" | "unverified" | "contradicted";
@@ -78,61 +79,77 @@ export function evaluatePromiseChecks(events: TraceEvent[]): PromiseCheck[] {
   return checks;
 }
 
-export function generateHandoffMarkdown(graph: WorkflowGraph, checks: PromiseCheck[] = []): string {
+// This document is pasted into another agent's context, so it is charged for by the
+// token on the far side: everything in it has to earn its place. Two rules follow.
+// A section with nothing in it is not rendered at all — an empty "Failed Attempts"
+// reads as "nothing failed" when it means "not measured", and that is worse than
+// silence. And nothing is listed just because it exists: the caps below keep a
+// 661-event run's handoff near 1.5k characters instead of the 16k it used to be,
+// almost all of which was internal event ids no reader outside this tool can resolve.
+const FILE_CAP = 12;
+const NODE_CAP = 8;
+
+export function generateHandoffMarkdown(
+  graph: WorkflowGraph,
+  checks: PromiseCheck[] = [],
+  events: TraceEvent[] = []
+): string {
   const files = graph.nodes.filter((node) => node.type === "FILE");
   const decisions = graph.nodes.filter((node) => node.type === "DECISION");
   const failures = graph.nodes.filter((node) => node.status === "FAILED");
   const blockers = graph.nodes.filter((node) => node.type === "BLOCKER" || node.status === "BLOCKED");
   const commands = graph.nodes.filter((node) => node.type === "COMMAND");
+  const objective = firstUserPrompt(events);
+
+  const section = (title: string, body: string | null): string[] => (body ? [`## ${title}`, body, ``] : []);
+
   return [
     `# Agent-Blackbox Handoff`,
     ``,
-    `## Current Objective`,
-    `Run: ${graph.runId}`,
-    ``,
-    `## What Has Been Observed`,
-    `- Events applied: ${graph.appliedEventIds.length}`,
-    `- Nodes: ${graph.nodes.length}`,
-    `- Edges: ${graph.edges.length}`,
-    ``,
-    `## Files In Play`,
-    renderNodeList(files),
-    ``,
-    `## Decisions`,
-    renderNodeList(decisions),
-    ``,
-    `## Commands / Verification`,
-    renderNodeList(commands),
-    ``,
-    `## Failed Attempts`,
-    renderNodeList(failures),
-    ``,
-    `## Blockers / Approval Needed`,
-    renderNodeList(blockers),
-    ``,
-    `## Promise Checks`,
-    checks.length === 0
-      ? `- No model claims matched the built-in promise-check rules.`
-      : checks
-          .map((check) => `- ${check.status.toUpperCase()}: ${check.claim} (${check.evidenceEventIds.join(", ") || "no evidence"})`)
-          .join("\n"),
-    ``,
+    ...section("Current Objective", objective ?? `Not captured in the recorded events (run ${graph.runId}).`),
+    ...section(
+      "What Has Been Observed",
+      `- ${graph.appliedEventIds.length} events · ${graph.nodes.length} nodes · ${files.length} files touched`
+    ),
+    ...section("Files In Play", renderFiles(files, graph)),
+    ...section("Decisions", renderNodeList(decisions)),
+    ...section("Commands / Verification", renderNodeList(commands)),
+    ...section("Failed Attempts", renderNodeList(failures)),
+    ...section("Blockers / Approval Needed", renderNodeList(blockers)),
+    ...section(
+      "Promise Checks",
+      checks.length === 0 ? null : checks.map((check) => `- ${check.status.toUpperCase()}: ${check.claim}`).join("\n")
+    ),
     `## Next Safe Action`,
     blockers.length > 0
       ? `Resolve or approve the blocker before continuing.`
       : failures.length > 0
         ? `Inspect the latest failed command or error node before editing again.`
-        : `Continue from the latest decision or verification node.`
+        : commands.length > 0
+          ? `Continue from the last verified command; re-run it before trusting the state.`
+          : `Continue from the last file touched above.`
   ].join("\n");
 }
 
-function renderNodeList(nodes: WorkflowNode[]): string {
-  if (nodes.length === 0) {
-    return "- None recorded.";
-  }
-  return nodes
-    .map((node) => `- ${node.label} [${node.status}] events=${node.eventIds.join(",") || "none"}`)
-    .join("\n");
+// "In play" means the run was working on it, so files it changed outrank files it only
+// read, and the most recent of each comes first — a truncated list should keep what a
+// continuation actually needs.
+function renderFiles(files: WorkflowNode[], graph: WorkflowGraph): string | null {
+  if (files.length === 0) return null;
+  const changed = new Set(
+    graph.edges.filter((edge) => edge.type === "EDITS" || edge.type === "CREATES").map((edge) => edge.to)
+  );
+  const ranked = [...files].reverse().sort((a, b) => Number(changed.has(b.id)) - Number(changed.has(a.id)));
+  const shown = ranked
+    .slice(0, FILE_CAP)
+    .map((node) => `- ${node.label}${changed.has(node.id) ? " [changed]" : ""}`);
+  return [...shown, ...(files.length > FILE_CAP ? [`- …and ${files.length - FILE_CAP} more`] : [])].join("\n");
+}
+
+function renderNodeList(nodes: WorkflowNode[]): string | null {
+  if (nodes.length === 0) return null;
+  const shown = nodes.slice(-NODE_CAP).map((node) => `- ${node.label} [${node.status}]`);
+  return [...shown, ...(nodes.length > NODE_CAP ? [`- …and ${nodes.length - NODE_CAP} earlier`] : [])].join("\n");
 }
 
 function stringPayload(event: TraceEvent, key: string): string | undefined {

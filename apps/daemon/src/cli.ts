@@ -159,7 +159,7 @@ async function main(argv: string[]): Promise<void> {
       throw new Error("Usage: agent-blackbox handoff <events.ndjson>");
     }
     const events = await loadTraceEvents(eventsFile);
-    console.log(generateHandoffMarkdown(materializeWorkflowGraph(events), evaluatePromiseChecks(events)));
+    console.log(generateHandoffMarkdown(materializeWorkflowGraph(events), evaluatePromiseChecks(events), events));
     return;
   }
 

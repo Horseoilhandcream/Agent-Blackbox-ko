@@ -316,7 +316,7 @@ export async function buildTraceSnapshot(
   // Pass the whole-file events so every run is summarised, not just the visible one.
   const baselines = await updateBaselines(eventsFile, events);
   const rulePacks = await loadRulePacks(events);
-  const handoffMarkdown = generateHandoffMarkdown(graph, checks);
+  const handoffMarkdown = generateHandoffMarkdown(graph, checks, events);
   return {
     events,
     graph,

@@ -1,4 +1,5 @@
 import type { TraceEvent, WorkflowGraph, WorkflowNode } from "@agent-blackbox/core";
+import { promptTextForEvent } from "@agent-blackbox/core";
 
 export type PositionedNode = WorkflowNode & {
   x: number;
@@ -1091,41 +1092,6 @@ function visibleTextForEvent(event: TraceEvent): string | undefined {
   if (event.kind === "model_switched") return `Switched model to ${switchedModelName(event)}`;
   if (event.kind === "host_event") return `${hostDisplayName(event.host)}: ${hostEventLabel(event)}`;
   return undefined;
-}
-
-function promptTextForEvent(event: TraceEvent): string | undefined {
-  // OpenCode nests under properties.*; Claude Code puts role/text at the payload top
-  // level. Read both so a prompt renders regardless of host.
-  const role =
-    stringPayloadPath(event, ["properties.role"]) ??
-    stringPayloadPath(event, ["properties.info.role"]) ??
-    stringPayloadPath(event, ["role"]);
-  const text =
-    stringPayloadPath(event, ["properties.text"]) ??
-    stringPayloadPath(event, ["properties.content"]) ??
-    stringPayloadPath(event, ["properties.prompt"]) ??
-    stringPayloadPath(event, ["properties.part.text"]) ??
-    stringPayloadPath(event, ["properties.part.content"]) ??
-    stringPayloadPath(event, ["text"]);
-  if (event.kind === "message" && role === "user" && text) {
-    return cleanPromptText(text);
-  }
-
-  const title = stringPayloadPath(event, ["properties.info.title"]);
-  if ((event.kind === "session_created" || event.kind === "session_updated") && title && !isDefaultSessionTitle(title)) {
-    return cleanPromptText(title);
-  }
-  return undefined;
-}
-
-function cleanPromptText(value: string): string | undefined {
-  const normalized = value.replace(/\s+/g, " ").trim();
-  if (normalized.length === 0) return undefined;
-  return normalized.length > 1600 ? `${normalized.slice(0, 1597)}...` : normalized;
-}
-
-function isDefaultSessionTitle(value: string): boolean {
-  return /^new session\b/i.test(value.trim());
 }
 
 function fileMentionsFromText(value: string): string[] {
