@@ -17,6 +17,16 @@ raw-logs/
 *.jpg
 node_modules/
 dist/
+
+# Compiled output must never sit beside a source file: Vitest and tsx resolve a
+# `./x.js` import to the real file if one exists, so a stray build artifact silently
+# tests yesterday's code. This bit v0.49.4, where 20 of them were committed by mistake.
+packages/*/src/*.js
+packages/*/src/*.d.ts
+packages/*/src/*.js.map
+packages/*/src/*.d.ts.map
+apps/*/src/*.js
+apps/*/src/*.d.ts
 *.tsbuildinfo
 .turbo/
 .vite/

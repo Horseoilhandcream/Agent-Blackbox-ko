@@ -210,6 +210,7 @@ function minimizeOpenCodeEventPayload(raw: UnknownRecord, type: string): JsonObj
       role,
       agent: readString(info, ["agent"]),
       modelID: readString(info, ["modelID", "model.modelID"]),
+      tokens: readTokenUsage(info),
       text: userText,
       field: readString(properties, ["field"]),
       deltaLength: readString(properties, ["delta"])?.length,
@@ -600,6 +601,31 @@ function readPath(record: UnknownRecord, path: string): unknown {
     current = current[part];
   }
   return current;
+}
+
+// The measured cost of the turn. This payload is rebuilt through an allowlist, and
+// `tokens` was not on it — so the default host shipped no per-turn telemetry at all:
+// every OpenCode run fell back to character estimates and cache-hit read "n/a", while
+// Claude Code and Codex were scored on real numbers. Six fields, all counts.
+//
+// OpenCode reports `input` as the UNCACHED remainder, with the cache alongside it —
+// verified against its own message store, where a warm turn reads input 577 against
+// cache.read 20,096. Core canonicalises that per host; do not pre-sum it here.
+function readTokenUsage(info: UnknownRecord): JsonObject | undefined {
+  const tokens = asRecord(info.tokens);
+  if (Object.keys(tokens).length === 0) return undefined;
+  const cache = asRecord(tokens.cache);
+  const count = (value: unknown): number => (typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0);
+  const usage: JsonObject = {
+    input: count(tokens.input),
+    output: count(tokens.output),
+    reasoning: count(tokens.reasoning),
+    cache: { read: count(cache.read), write: count(cache.write) }
+  };
+  // A streaming message is updated many times before its usage lands; an all-zero
+  // snapshot is not a measurement and would drag the run's numbers toward zero.
+  const total = (usage.input as number) + (usage.output as number) + ((usage.cache as JsonObject).read as number);
+  return total > 0 ? usage : undefined;
 }
 
 function compactJsonObject(input: Record<string, unknown>): JsonObject {

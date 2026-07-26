@@ -93,7 +93,13 @@ describe("gjc normalizer", () => {
     expect(serialized).not.toContain("/home/alice/project");
     expect(serialized).not.toContain("ghp_123456789012345678901234567890");
     expect(serialized).toContain("$PROJECT");
-    expect(events[0]?.payload).toEqual({ role: "user", chars: 76 });
+    // The prompt text is carried so the run can be named, and it goes through the same
+    // redaction as everything else: the secret and the absolute path never reach disk.
+    expect(events[0]?.payload).toEqual({
+      role: "user",
+      chars: 76,
+      text: "Investigate $PROJECT and token [REDACTED_GITHUB_TOKEN]"
+    });
     expect(events[0]?.redaction?.rawStored).toBe(false);
   });
 

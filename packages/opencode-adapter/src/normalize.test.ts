@@ -444,4 +444,48 @@ describe("OpenCode event normalization", () => {
       text: "Please edit $PROJECT/src/calc.js"
     });
   });
+
+  it("carries the assistant turn's token usage, so the default host is scored on real numbers", () => {
+    // This payload is rebuilt through an allowlist and `tokens` was not on it, so every
+    // OpenCode run fell back to character estimates while Claude Code and Codex were
+    // measured. `input` is the UNCACHED remainder here — verified against OpenCode's own
+    // message store, where a warm turn reads input 577 against cache.read 20,096 — so it
+    // is passed through as reported and canonicalised per host in core.
+    const event = normalizeOpenCodeEvent(
+      {
+        id: "evt-assistant",
+        type: "message.updated",
+        properties: {
+          sessionID: "session-1",
+          info: {
+            id: "message-2",
+            role: "assistant",
+            modelID: "claude-opus-5",
+            tokens: { input: 577, output: 91, reasoning: 43, cache: { read: 20_096, write: 0 } }
+          }
+        }
+      },
+      { runId: "run-opencode", seq: 11, defaultSessionId: "unknown-session" }
+    );
+
+    expect(event.payload).toMatchObject({
+      properties: { role: "assistant", tokens: { input: 577, output: 91, reasoning: 43, cache: { read: 20_096, write: 0 } } }
+    });
+  });
+
+  it("ignores the empty usage a streaming message reports before its totals land", () => {
+    const event = normalizeOpenCodeEvent(
+      {
+        id: "evt-streaming",
+        type: "message.updated",
+        properties: {
+          sessionID: "session-1",
+          info: { id: "message-3", role: "assistant", tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } }
+        }
+      },
+      { runId: "run-opencode", seq: 12, defaultSessionId: "unknown-session" }
+    );
+
+    expect((event.payload as Record<string, Record<string, unknown>>).properties?.tokens).toBeUndefined();
+  });
 });

@@ -84,7 +84,15 @@ function consumeMessage(line: UnknownRecord, ctx: GjcNormalizerContext, toolUses
 
   if ((role === "user" || role === "assistant") && !hasToolOnlyContent(msg.content)) {
     const text = extractText(msg.content);
-    if (text) events.push(mkInput(line, ctx, { kind: "message", summary: `${role} message`, payload: { role, chars: text.length } }));
+    if (text) {
+      // Carry the user's own words, as the other hosts do. Only their length was kept
+      // before, which left nothing downstream able to name the task: the run picker
+      // showed an opaque id and the handoff's objective read "not captured". The
+      // model's replies stay counted-only — a prompt identifies the run, an assistant
+      // turn is just volume, and this payload is redacted and stored either way.
+      const payload = role === "user" ? { role, chars: text.length, text: text.slice(0, 2000) } : { role, chars: text.length };
+      events.push(mkInput(line, ctx, { kind: "message", summary: `${role} message`, payload }));
+    }
   }
 
   const usage = asRecord(msg.usage);

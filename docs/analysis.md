@@ -36,7 +36,7 @@ weighted average. Thresholds are the current defaults (`packages/core/src/effici
 | id | What it catches | warn / bad | weight |
 |---|---|---|---|
 | `context-pressure` | peak input tokens | > 100k / > 180k | 1.5 |
-| `cache-hit` | prompt-cache reuse (only when the model reports cache telemetry) | < 60% / < 30% | 1.0 |
+| `cache-hit` | prompt-cache reuse — cache read ÷ whole prompt (only when the model reports cache telemetry) | < 60% / < 30% | 1.0 |
 | `redundant-reads` | the same file read more than once | ≥ 1 / ≥ 3 file (or ≥ 10k reclaimable) | 2.0 |
 | `read-amplification` | read tokens ÷ edited tokens (only when edits exist) | > 40× / > 120× | 2.0 |
 | `large-injections` | the biggest single tool/bash output | ≥ 5k / ≥ 15k | 1.5 |
@@ -49,6 +49,24 @@ weighted average. Thresholds are the current defaults (`packages/core/src/effici
 
 Each flagged metric carries coarse **offenders** (file basenames, command verbs)
 so advice can name what to fix.
+
+### Token semantics differ per host
+
+Hosts disagree about what `tokens.input` means, and both readings are in the wild:
+Claude Code, Codex and Gajae-Code report the **whole prompt** (the cached part
+included), while OpenCode reports only the **uncached remainder** with the cache
+counted alongside. Core canonicalises this once, keyed on the host stamped on every
+event, into `total` (the whole prompt) and `fresh` (the uncached part) — see
+`INPUT_IS_WHOLE_PROMPT` in `packages/core/src/efficiency.ts`.
+
+This matters for two metrics: `context-pressure` measures peak `total`, and
+`cache-hit` is `cacheRead / total`. Reading the raw field instead used to
+double-count the cache on the whole-prompt hosts, pinning the ratio near 50% however
+good the cache actually was (fixed in 0.49.2 / 0.49.4).
+
+Each host's entry in that map is asserted against the adapter that produces it by the
+coverage table in `apps/daemon/src/hostCoverage.test.ts`, which runs one physical
+session through every adapter and requires them to agree on the score.
 
 ---
 
@@ -208,4 +226,8 @@ Stated plainly, because these are heuristics:
   context windows.
 - **Baselines / effectiveness need real signal.** Token-economy figures are
   size-estimated when the model reports no token telemetry (`estimated: true`);
-  effectiveness reads `unclear` until enough outcome signal exists.
+  effectiveness reads `unclear` until enough outcome signal exists. Local models
+  routinely report zero usage, so an ollama-backed run is scored on estimates.
+- **The handoff describes only what was observed.** Its objective is the first
+  recorded prompt, not a restatement of intent, and its sections are omitted when
+  the host emits nothing for them rather than being padded with "none recorded".

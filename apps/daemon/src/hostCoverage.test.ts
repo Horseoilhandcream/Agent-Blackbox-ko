@@ -221,17 +221,11 @@ function capabilities(events: TraceEvent[]): Record<Capability, boolean> {
 // named rather than hidden so the next change either closes one deliberately (delete
 // the entry, flip the cell) or trips over it. A silently closed gap fails here too —
 // an adapter that starts emitting something core depends on should be a decision.
-const KNOWN_GAPS = {
-  // gjc records `{role, chars}` for a message and never the text itself
-  // (gjc-adapter/src/normalize.ts), so nothing downstream can name the task: the run
-  // picker shows an id and the handoff says the objective was not captured.
-  "gjc/objective": true,
-  // The OpenCode adapter rebuilds `message.updated` through an allowlist that has no
-  // `tokens` field (opencode-adapter/src/normalize.ts), so the default host reports no
-  // per-turn telemetry at all: every OpenCode run falls back to character estimates,
-  // and cache-hit reads "n/a" rather than a measured ratio.
-  "opencode/tokenTelemetry": true
-} as const;
+// Both gaps this table first measured are closed in 0.50.0 — the entries are gone, and
+// the cells below are true. The mechanism stays: a gap that closes silently fails here
+// too, because an adapter that starts emitting something core depends on should be a
+// decision, not a surprise.
+const KNOWN_GAPS = {} as const;
 
 describe("host coverage — what each adapter actually delivers to core", () => {
   it("records the capability table for every supported host", async () => {
@@ -266,7 +260,7 @@ describe("host coverage — what each adapter actually delivers to core", () => 
         subagents: false // no delegation primitive in the rollout transcript
       },
       gjc: {
-        objective: false, // KNOWN_GAPS["gjc/objective"]
+        objective: true,
         tokenTelemetry: true,
         cacheRatioTrue: true,
         commandOutcome: true,
@@ -277,8 +271,8 @@ describe("host coverage — what each adapter actually delivers to core", () => 
       },
       opencode: {
         objective: true,
-        tokenTelemetry: false, // KNOWN_GAPS["opencode/tokenTelemetry"]
-        cacheRatioTrue: false, // …and so the ratio cannot be measured either
+        tokenTelemetry: true,
+        cacheRatioTrue: true,
         commandOutcome: true,
         reusableCommand: true,
         fileReadSizes: true,
