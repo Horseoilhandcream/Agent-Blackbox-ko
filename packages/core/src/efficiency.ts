@@ -109,12 +109,47 @@ const baseName = (path: string): string => path.split(/[\\/]/).filter(Boolean).p
 const commandVerb = (command: string): string => command.trim().split(/\s+/)[0] || command;
 
 type TokenSnapshot = {
-  input: number;
+  input: number; // as the host reported it — semantics vary, use `total`/`fresh` instead
   output: number;
   reasoning: number;
   cacheRead: number;
   cacheWrite: number;
+  total: number; // the whole prompt that turn: fresh + cache read + cache write
+  fresh: number; // the uncached portion the model had to be charged full price for
 };
+
+// `tokens.input` means different things per host, and this file used to read it BOTH
+// ways: as the whole prompt (peak context pressure, total input) and as the uncached
+// remainder (cache-hit ratio, headline caption). On Claude Code — where `input` is the
+// whole prompt — that made `cacheRead + input` double-count the cached tokens, pinning
+// the displayed ratio near 50% however good the cache was: a run measured at a true
+// 98.5% hit rate scored 49.6%, fell under the 60% threshold, and was told to "stabilise
+// the prompt prefix" it had already stabilised. On OpenCode the error runs the other
+// way: `input` excludes cache reads, so peak context pressure omitted most of the
+// window. Canonicalise once, here, keyed on the host that is already stamped on every
+// event — so old traces re-read correctly and no metric has to know where it came from.
+//   claude-code: input_tokens + cache_read + cache_creation      → whole prompt
+//   codex:       usage.input_tokens, cached_input_tokens ⊂ it    → whole prompt
+//   opencode/gjc: AI-SDK inputTokens, cache read reported apart  → uncached only
+const INPUT_IS_WHOLE_PROMPT: Partial<Record<TraceEvent["host"], boolean>> = {
+  "claude-code": true,
+  codex: true,
+  opencode: false,
+  gjc: false
+};
+
+function canonicalizeTokens(
+  host: TraceEvent["host"],
+  input: number,
+  cacheRead: number,
+  cacheWrite: number
+): { total: number; fresh: number } {
+  // An unrecognised host falls back to shape: only a whole-prompt figure can cover
+  // the cached tokens it is being compared against.
+  const isWhole = INPUT_IS_WHOLE_PROMPT[host] ?? input >= cacheRead + cacheWrite;
+  const total = isWhole ? input : input + cacheRead + cacheWrite;
+  return { total, fresh: Math.max(0, total - cacheRead - cacheWrite) };
+}
 
 export type EfficiencyOptions = {
   // Override the inferred task archetype (callers that already know it). Omitted →
@@ -132,7 +167,7 @@ export function computeEfficiencyReport(events: TraceEvent[], options: Efficienc
     if (!snap) continue;
     hasRealTokens = true;
     finalSnapshot = snap;
-    peakInput = Math.max(peakInput, snap.input);
+    peakInput = Math.max(peakInput, snap.total);
   }
 
   // --- size aggregates from the events --------------------------------------
@@ -171,7 +206,7 @@ export function computeEfficiencyReport(events: TraceEvent[], options: Efficienc
   // Edits were previously omitted, understating edit-heavy runs' context use and so inflating
   // their yield-density. Sum the already-computed token fields directly.
   const injectionTokens = injections.reduce((s, i) => s + i.tokens, 0);
-  const totalInputTokens = hasRealTokens ? finalSnapshot!.input : totalReadTokens + totalEditTokens + injectionTokens;
+  const totalInputTokens = hasRealTokens ? finalSnapshot!.total : totalReadTokens + totalEditTokens + injectionTokens;
   const peak = hasRealTokens ? peakInput : totalInputTokens;
 
   const metrics: { metric: EfficiencyMetric; weight: number }[] = [];
@@ -205,8 +240,9 @@ export function computeEfficiencyReport(events: TraceEvent[], options: Efficienc
   // --- 2. cache hit ratio ----------------------------------------------------
   {
     const cacheRead = finalSnapshot?.cacheRead ?? 0;
-    const fresh = finalSnapshot?.input ?? 0;
-    const denom = cacheRead + fresh;
+    // The denominator is the whole prompt, which already contains the cached part —
+    // adding cacheRead to it again would count those tokens twice.
+    const denom = finalSnapshot?.total ?? 0;
     const hasCacheTelemetry = hasRealTokens && (cacheRead > 0 || (finalSnapshot?.cacheWrite ?? 0) > 0);
     const ratio = denom > 0 ? cacheRead / denom : 0;
     if (hasCacheTelemetry) {
@@ -634,8 +670,7 @@ function buildHeadline(
   const parts: string[] = [];
   if (totalInput > 0) parts.push(`${hasRealTokens ? "" : "~"}${formatTokens(totalInput)} input`);
   if (snap && (snap.cacheRead > 0 || snap.cacheWrite > 0)) {
-    const denom = snap.cacheRead + snap.input;
-    if (denom > 0) parts.push(`cache ${Math.round((snap.cacheRead / denom) * 100)}%`);
+    if (snap.total > 0) parts.push(`cache ${Math.round((snap.cacheRead / snap.total) * 100)}%`);
   }
   if (reclaimable > 0) parts.push(`~${formatTokens(reclaimable)} reclaimable`);
   return parts.join(" · ");
@@ -679,7 +714,7 @@ function readTokenSnapshot(event: TraceEvent): TokenSnapshot | undefined {
     isRecordAtPath(event.payload, "properties.tokens") ||
     isRecordAtPath(event.payload, "tokens");
   if (!present) return undefined;
-  return {
+  const raw = {
     input: deepNumber(event.payload, ["properties.info.tokens.input", "properties.tokens.input", "tokens.input"]) ?? 0,
     output: deepNumber(event.payload, ["properties.info.tokens.output", "properties.tokens.output", "tokens.output"]) ?? 0,
     reasoning:
@@ -701,6 +736,7 @@ function readTokenSnapshot(event: TraceEvent): TokenSnapshot | undefined {
         "tokens.cacheWrite"
       ]) ?? 0
   };
+  return { ...raw, ...canonicalizeTokens(event.host, raw.input, raw.cacheRead, raw.cacheWrite) };
 }
 
 function deepNumber(payload: Record<string, unknown>, path: string | string[]): number | undefined {

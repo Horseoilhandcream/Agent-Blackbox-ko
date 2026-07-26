@@ -6,6 +6,9 @@ import { buildDeterministicSuggestions, computeEfficiencyReport, type Efficiency
 const ev = (seq: number, kind: Parameters<typeof createTraceEvent>[1]["kind"], payload: Record<string, unknown>) =>
   createTraceEvent(seq, { host: "opencode", runId: "r", sessionId: "s", kind, payload: payload as never });
 
+const hostEv = (host: Parameters<typeof createTraceEvent>[1]["host"], payload: Record<string, unknown>) =>
+  createTraceEvent(1, { host, runId: "r", sessionId: "s", kind: "message", payload: payload as never });
+
 const metric = (report: { metrics: EfficiencyMetric[] }, id: string): EfficiencyMetric => {
   const m = report.metrics.find((x) => x.id === id);
   if (!m) throw new Error(`metric ${id} missing`);
@@ -93,16 +96,48 @@ describe("context efficiency report", () => {
   });
 
   it("reads real token snapshots for cache-hit and context-pressure", () => {
+    // OpenCode reports `input` as the UNCACHED remainder, with the cache counted
+    // alongside it — so the prompt that actually occupied the window is the sum.
     const report = computeEfficiencyReport([
       ev(1, "message", { properties: { tokens: { input: 200_000, output: 500, cache: { read: 150_000, write: 1000 } } } })
     ]);
     expect(report.estimated).toBe(false);
     const cache = metric(report, "cache-hit");
-    // 150000 / (150000 + 200000) ≈ 43%
+    // 150000 read / 351000 whole prompt ≈ 43%
     expect(Math.round(cache.value * 100)).toBe(43);
     const pressure = metric(report, "context-pressure");
-    expect(pressure.value).toBe(200_000);
+    expect(pressure.value).toBe(351_000); // 200k fresh + 150k cache read + 1k cache write
     expect(pressure.status).toBe("bad"); // > 180k
+  });
+
+  it("scores the same physical run identically whichever host reported it", () => {
+    // The same turn, described in each host's own convention: 125,976 tokens served
+    // from cache, 1,973 written to it, 2 charged fresh — a 98.5% hit rate. Claude Code
+    // and Codex report `input` as the whole prompt (the cached part included); OpenCode
+    // reports only the uncached remainder. Reading `input` without accounting for that
+    // used to double-count the cache, pinning the ratio near 50% however good it was.
+    const claudeCode = computeEfficiencyReport([
+      hostEv("claude-code", { tokens: { input: 127_951, output: 100, cache: { read: 125_976, write: 1973 } } })
+    ]);
+    const openCode = computeEfficiencyReport([
+      hostEv("opencode", { properties: { tokens: { input: 2, output: 100, cache: { read: 125_976, write: 1973 } } } })
+    ]);
+    const codex = computeEfficiencyReport([
+      hostEv("codex", { tokens: { input: 127_951, output: 100, cache: { read: 125_976, write: 0 } } })
+    ]);
+
+    for (const [host, report] of [
+      ["claude-code", claudeCode],
+      ["opencode", openCode],
+      ["codex", codex]
+    ] as const) {
+      const cache = metric(report, "cache-hit");
+      expect(Math.round(cache.value * 100), host).toBeGreaterThanOrEqual(98);
+      expect(cache.status, host).toBe("good"); // and so no "stabilise the prefix" advice
+      expect(metric(report, "context-pressure").value, host).toBeGreaterThan(120_000);
+    }
+    expect(metric(claudeCode, "cache-hit").value).toBeCloseTo(metric(openCode, "cache-hit").value, 5);
+    expect(metric(claudeCode, "context-pressure").value).toBe(metric(openCode, "context-pressure").value);
   });
 
   it("marks cache-hit n/a (weight 0) when no cache telemetry and estimates tokens", () => {
