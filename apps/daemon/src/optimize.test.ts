@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { runOptimize } from "./optimize.js";
+import { isReusableCommand, runOptimize } from "./optimize.js";
 
 const ev = (
   seq: number,
@@ -256,5 +256,64 @@ describe("optimize (AGENTS.md efficiency memory)", () => {
     const reverted = await runOptimize({ projectDir: dir, mode: "revert" });
     expect(reverted.agentsMdPath).toBe(join(dir, "CLAUDE.md"));
     await expect(readFile(join(dir, "CLAUDE.md"), "utf8")).rejects.toThrow();
+  });
+});
+
+// The commands below are verbatim from a real 661-event Claude Code run whose
+// optimize preview offered all four as "verified commands worth reusing". Each one
+// is a one-off: pinning it would add noise to the context of every future run.
+describe("verified commands (what earns a place in the memory block)", () => {
+  const REAL_ONE_OFFS = [
+    'uv --version 2>&1; echo "---"; gh auth status 2>&1 | head -8',
+    "mkdir -p ~/demo && cd ~/demo && git init -b main && git clone --depth 1 ~/src vendor",
+    `curl -s -X POST http://127.0.0.1:8800/api/generate -d '{"prompt":"why is the sky blue"}'`,
+    "git clone --depth 1 https://github.com/example/repo"
+  ];
+
+  it("pins the project's real test command and drops one-off pipelines", async () => {
+    const ts = "2026-06-01T00:00:00.000Z";
+    const events = [
+      ...wasteful("run-a", ts),
+      ...REAL_ONE_OFFS.map((command, i) => ev(10 + i, "run-a", ts, "bash", { command, exitCode: 0, outputChars: 100 })),
+      ev(20, "run-a", ts, "bash", { command: "npm test", exitCode: 0, outputChars: 100 })
+    ];
+    await seed(events);
+
+    await runOptimize({ projectDir: dir, mode: "apply" });
+    const block = await readFile(join(dir, "AGENTS.md"), "utf8");
+
+    expect(block).toContain("npm test");
+    for (const oneOff of REAL_ONE_OFFS) expect(block).not.toContain(oneOff);
+    expect(block).not.toContain("git clone");
+    expect(block).not.toContain("curl");
+  });
+
+  it("accepts build/verify shapes and rejects side effects and one-offs", () => {
+    for (const ok of [
+      "npm test", "npm run build", "pnpm lint", "go test ./...", "cargo clippy",
+      "make", "pytest -q", "npx tsc --noEmit", "bundle exec rspec", "uv run pytest"
+    ]) {
+      expect(isReusableCommand(ok), ok).toBe(true);
+    }
+    for (const no of [
+      "npm install", "npm run dev", "git clone x", "curl http://x", "mkdir -p x",
+      "uv --version", "ls -la", "npm test && git push", "echo hi | grep h",
+      `node -e "${"x".repeat(120)}"`
+    ]) {
+      expect(isReusableCommand(no), no).toBe(false);
+    }
+  });
+
+  it("never carries a secret from a command line into the committed memory file", async () => {
+    const ts = "2026-06-01T00:00:00.000Z";
+    await seed([
+      ...wasteful("run-a", ts),
+      ev(10, "run-a", ts, "bash", { command: "npm test --token=sk-ant-0123456789abcdefghijklmno", exitCode: 0, outputChars: 10 })
+    ]);
+
+    await runOptimize({ projectDir: dir, mode: "apply" });
+    const block = await readFile(join(dir, "AGENTS.md"), "utf8");
+    expect(block).not.toContain("sk-ant-0123456789abcdefghijklmno");
+    expect(block).toContain("[REDACTED_ANTHROPIC_KEY]");
   });
 });

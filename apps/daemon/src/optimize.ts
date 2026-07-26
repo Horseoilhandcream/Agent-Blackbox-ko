@@ -6,6 +6,7 @@ import {
   emptyProfile,
   hasManagedBlock,
   isEfficiencyProfile,
+  redactJsonValue,
   removeManagedBlock,
   upsertManagedBlock,
   type EfficiencyProfile,
@@ -284,28 +285,69 @@ function latestRun(events: TraceEvent[]): { runId: string | null; events: TraceE
   return { runId, events: events.filter((e) => e.runId === runId) };
 }
 
-// Pin build/test/run commands worth reusing — not read-only exploration, which
-// the next run should still do fresh against the current tree.
-const NAV_VERBS = new Set([
-  "ls", "pwd", "cat", "find", "grep", "rg", "fd", "head", "tail", "echo", "which",
-  "env", "cd", "tree", "stat", "wc", "sort", "uniq", "clear", "sleep", "true", "false"
+// Pin build/test/verify commands worth reusing — not read-only exploration (the next
+// run should do that fresh against the current tree) and not one-off pipelines. Every
+// line pinned here is context the agent carries on EVERY future run, so a wrong pin
+// makes the waste it was meant to cut. This used to be a deny-list of ~20 navigation
+// verbs tested against the first token, which let anything unlisted through whole:
+// `curl … -d '{"prompt":…}'`, `mkdir -p … && cd … && git clone …`, `uv --version; gh
+// auth status` all qualified as "verified commands". One-off shapes are unbounded, so
+// match the closed set instead: a reusable command is a SINGLE command, run by a known
+// build/test runner, naming a verifying action, and short.
+const COMPOUND = /[;&|]|\$\(|`|\n|>>?|<\(/;
+
+// Tools whose whole purpose is building or verifying — naming one is enough.
+const VERIFY_TOOLS = new Set([
+  "make", "pytest", "vitest", "jest", "tsc", "rspec", "tox", "nox", "ruff", "eslint",
+  "rake", "cmake", "ninja", "gradle", "mvn", "phpunit", "clippy", "biome"
 ]);
 
+// Multi-purpose runners — they must also name a verifying action or a verify tool,
+// so `npm test` pins but `npm install` (a side effect) and `npm run dev` don't.
+const RUNNERS = new Set([
+  "npm", "pnpm", "yarn", "bun", "npx", "bunx", "cargo", "go", "uv", "poetry",
+  "dotnet", "mix", "bundle", "just", "task", "swift", "zig", "deno", "sbt", "stack"
+]);
+
+const VERIFY_VERBS = new Set([
+  "test", "tests", "build", "lint", "typecheck", "check", "fmt", "format",
+  "ci", "e2e", "vet", "clippy", "coverage", "audit"
+]);
+
+// `run`/`exec` are plumbing — look past them at what is actually being run.
+const PLUMBING = new Set(["run", "exec"]);
+
+const MAX_COMMAND_CHARS = 100;
+const MAX_COMMANDS = 3;
+
+export function isReusableCommand(command: string): boolean {
+  if (command.length === 0 || command.length > MAX_COMMAND_CHARS) return false;
+  if (COMPOUND.test(command)) return false; // a reusable command is one command
+  const tokens = command.split(/\s+/);
+  const verb = tokens[0] ?? "";
+  if (VERIFY_TOOLS.has(verb)) return true;
+  if (!RUNNERS.has(verb)) return false;
+  return tokens.slice(1).some((token) => !PLUMBING.has(token) && (VERIFY_VERBS.has(token) || VERIFY_TOOLS.has(token)));
+}
+
 function verifiedCommands(events: TraceEvent[]): string[] {
-  const out: string[] = [];
-  const seen = new Set<string>();
+  // Rank by how often the command succeeded: one the run repeated is the project's
+  // canonical command, not an incidental invocation.
+  const hits = new Map<string, number>();
   for (const e of events) {
     if (e.kind !== "bash") continue;
     const payload = e.payload as Record<string, unknown> | undefined;
     if (!payload || payload.exitCode !== 0) continue;
     const command = typeof payload.command === "string" ? payload.command.trim() : "";
-    if (!command || seen.has(command)) continue;
-    const verb = command.split(/\s+/)[0] ?? "";
-    if (NAV_VERBS.has(verb)) continue; // skip pure exploration/navigation
-    seen.add(command);
-    out.push(command);
+    if (!isReusableCommand(command)) continue;
+    hits.set(command, (hits.get(command) ?? 0) + 1);
   }
-  return out;
+  return [...hits.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, MAX_COMMANDS)
+    // This block lands in a CLAUDE.md/AGENTS.md that is usually committed, so a token
+    // that happened to sit in a command line must not ride into the repo with it.
+    .map(([command]) => redactJsonValue(command).value);
 }
 
 async function readMaybe(path: string): Promise<string | null> {
