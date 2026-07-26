@@ -56,7 +56,9 @@ export type RunningTraceDaemon = {
 
 export type TraceSnapshot = {
   events: TraceEvent[];
-  graph: WorkflowGraph;
+  // null only on a live stream frame for a large store — see GRAPH_BROADCAST_MAX. The
+  // REST snapshot always carries it.
+  graph: WorkflowGraph | null;
   checks: PromiseCheck[];
   efficiency: EfficiencyReport;
   effectiveness: EffectivenessReport;
@@ -111,7 +113,9 @@ export async function startTraceDaemon(options: TraceDaemonOptions): Promise<Run
         drop();
         client.terminate();
       });
-      void sendSnapshot(client, eventsFile);
+      void sendSnapshot(client, eventsFile).then((lastEventId) => {
+        if (clients.size === 1) scheduleBroadcast.seedCursor(lastEventId);
+      });
     });
   });
   const port = options.port ?? 47831;
@@ -296,19 +300,34 @@ export async function buildReplaySummary(eventsFile: string): Promise<{
   };
 }
 
+// Above this many events, a LIVE stream frame ships no whole-store graph. The dashboard
+// rebuilds the graph from the run it is actually viewing anyway (DashboardApp's `graph`
+// memo), and only reuses ours in the one case where the whole store is a single run —
+// which a global recorder stops being after the first session. Measured on a real 30k
+// store: the build the client discarded was 819ms of the ~960ms snapshot and 30.2MB of
+// the 50.6MB frame. Small stores keep the old behaviour byte-for-byte, so a first
+// session still gets the server-built graph on its very first paint.
+export const GRAPH_BROADCAST_MAX = 3_000;
+
 export async function buildTraceSnapshot(
   eventsFile: string,
-  replay: { seq?: number; at?: string } = {}
+  replay: { seq?: number; at?: string } = {},
+  options: { live?: boolean } = {}
 ): Promise<TraceSnapshot> {
   const events = await loadRecentTraceEvents(eventsFile);
-  const graph =
-    replay.seq !== undefined
+  const replaying = replay.seq !== undefined || replay.at !== undefined;
+  const skipGraph = options.live === true && !replaying && events.length > GRAPH_BROADCAST_MAX;
+  const graph = skipGraph
+    ? null
+    : replay.seq !== undefined
       ? replayWorkflowGraphAtSeq(events, replay.seq)
       : replay.at !== undefined
         ? replayWorkflowGraphAtTime(events, replay.at)
         : materializeWorkflowGraph(events);
-  const replayedEvents = new Set(graph.appliedEventIds);
-  const visibleEvents = events.filter((event) => replayedEvents.has(event.id));
+  // Live mode applies every event, so the visible set is the whole store; only a replay
+  // narrows it, and a replay always builds the graph.
+  const replayedEvents = graph ? new Set(graph.appliedEventIds) : null;
+  const visibleEvents = replayedEvents ? events.filter((event) => replayedEvents.has(event.id)) : events;
   const checks = evaluatePromiseChecks(visibleEvents);
   const efficiency = computeEfficiencyReport(visibleEvents);
   const effectiveness = computeEffectiveness(visibleEvents, checks);
@@ -316,7 +335,9 @@ export async function buildTraceSnapshot(
   // Pass the whole-file events so every run is summarised, not just the visible one.
   const baselines = await updateBaselines(eventsFile, events);
   const rulePacks = await loadRulePacks(events);
-  const handoffMarkdown = generateHandoffMarkdown(graph, checks, events);
+  // The dashboard regenerates this from the run it is viewing (its own `handoffMarkdown`
+  // memo), so a live frame without a graph simply doesn't carry one.
+  const handoffMarkdown = graph ? generateHandoffMarkdown(graph, checks, events) : "";
   return {
     events,
     graph,
@@ -481,15 +502,45 @@ async function handleRequest(
   }
 }
 
-async function broadcastSnapshot(clients: Set<WebSocket>, eventsFile: string): Promise<void> {
+// Where the stream left off: the id of the last event every connected client has been
+// sent. Ids are unique and the store is append-only, so finding it in the cache says
+// exactly what is new. It is deliberately NOT a seq — seq counts within a run, and one
+// store holds many runs.
+type StreamCursor = { lastEventId: string | null };
+
+async function broadcastSnapshot(clients: Set<WebSocket>, eventsFile: string, cursor: StreamCursor): Promise<void> {
   if (clients.size === 0) {
     return;
   }
-  // Build + serialize the snapshot ONCE, then fan the same frame out to every client —
-  // not once per client (which re-ran the whole O(N) graph build per socket).
+  // Build + serialize ONCE, then fan the same frame out to every client — not once per
+  // client (which re-ran the whole O(N) graph build per socket).
+  //
+  // An update carries only the events that are new since the last frame. Re-sending the
+  // whole store on every event meant a 50.6MB frame and a ~960ms rebuild per event on a
+  // real 30k store — one connected dashboard pinned a core and pushed RSS past 900MB,
+  // to tell it about a handful of events it could have been handed in 2KB.
   let frame: string;
   try {
-    frame = JSON.stringify({ type: "snapshot", data: await buildTraceSnapshot(eventsFile) });
+    const events = await loadRecentTraceEvents(eventsFile);
+    const from = cursor.lastEventId;
+    const known = from ? events.findIndex((event) => event.id === from) : -1;
+    if (from !== null && known >= 0) {
+      const fresh = events.slice(known + 1);
+      if (fresh.length === 0) return; // nothing happened worth a frame
+      frame = JSON.stringify({
+        type: "append",
+        fromEventId: from,
+        cap: SNAPSHOT_EVENT_CAP,
+        events: fresh,
+        baselines: await updateBaselines(eventsFile, events),
+        rulePacks: await loadRulePacks(events)
+      });
+    } else {
+      // No cursor yet, or it fell out of the capped window: the client cannot splice a
+      // delta onto what it has, so send it a whole snapshot to start from.
+      frame = JSON.stringify({ type: "snapshot", data: await buildTraceSnapshot(eventsFile, {}, { live: true }) });
+    }
+    cursor.lastEventId = events.at(-1)?.id ?? cursor.lastEventId;
   } catch (error) {
     const errFrame = JSON.stringify({
       type: "error",
@@ -506,10 +557,16 @@ async function broadcastSnapshot(clients: Set<WebSocket>, eventsFile: string): P
 // SERIALIZED — a new request that arrives while one is in flight is collapsed into a
 // single trailing rebuild — so on a large log the ~O(N) build can't overlap itself and
 // back up the event loop; the rate self-limits to one build per (buildTime + delayMs).
-function makeBroadcastScheduler(clients: Set<WebSocket>, eventsFile: string, delayMs = 150): () => void {
+type BroadcastScheduler = (() => void) & { seedCursor: (lastEventId: string | null) => void };
+
+function makeBroadcastScheduler(clients: Set<WebSocket>, eventsFile: string, delayMs = 150): BroadcastScheduler {
   let timer: ReturnType<typeof setTimeout> | null = null;
   let building = false;
   let pending = false;
+  // One cursor for the whole fan-out: every client is sent the same frame, so they all
+  // sit at the same point in the store. A client that joins mid-stream gets a full
+  // snapshot on connect, which can overlap the next delta — it drops ids it already has.
+  const cursor: StreamCursor = { lastEventId: null };
   const schedule = (): void => {
     if (building) {
       pending = true; // a build is running — remember to rebuild once it finishes
@@ -522,7 +579,7 @@ function makeBroadcastScheduler(clients: Set<WebSocket>, eventsFile: string, del
       // Fire-and-forget, so it must never reject: an unhandled rejection tears down
       // the whole daemon on modern Node. The build itself is already guarded inside
       // broadcastSnapshot; this covers the fan-out and anything added later.
-      void broadcastSnapshot(clients, eventsFile).catch(() => undefined).finally(() => {
+      void broadcastSnapshot(clients, eventsFile, cursor).catch(() => undefined).finally(() => {
         building = false;
         if (pending) {
           pending = false;
@@ -532,15 +589,24 @@ function makeBroadcastScheduler(clients: Set<WebSocket>, eventsFile: string, del
     }, delayMs);
     if (typeof timer.unref === "function") timer.unref();
   };
+  // The first client is handed a whole snapshot on connect, so the stream can start
+  // from where that client already is instead of repeating it as the opening frame.
+  // Only when it is the ONLY client: moving the cursor forward past an earlier client
+  // would skip the events between them.
+  schedule.seedCursor = (lastEventId: string | null): void => {
+    if (cursor.lastEventId === null) cursor.lastEventId = lastEventId;
+  };
   return schedule;
 }
 
-async function sendSnapshot(client: WebSocket, eventsFile: string): Promise<void> {
+async function sendSnapshot(client: WebSocket, eventsFile: string): Promise<string | null> {
   if (client.readyState !== WebSocket.OPEN) {
-    return;
+    return null;
   }
   try {
-    client.send(JSON.stringify({ type: "snapshot", data: await buildTraceSnapshot(eventsFile) }));
+    const data = await buildTraceSnapshot(eventsFile, {}, { live: true });
+    client.send(JSON.stringify({ type: "snapshot", data }));
+    return data.events.at(-1)?.id ?? null;
   } catch (error) {
     if (client.readyState === WebSocket.OPEN) {
       client.send(
@@ -551,6 +617,7 @@ async function sendSnapshot(client: WebSocket, eventsFile: string): Promise<void
       );
     }
   }
+  return null;
 }
 
 const MAX_BODY_BYTES = 50_000_000;

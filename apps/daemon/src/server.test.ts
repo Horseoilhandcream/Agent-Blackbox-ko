@@ -4,7 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WebSocket, type RawData } from "ws";
 import { afterEach, describe, expect, it } from "vitest";
-import { buildReplaySummary, buildTraceSnapshot, loadRecentTraceEvents, startTraceDaemon } from "./server.js";
+import {
+  buildReplaySummary,
+  buildTraceSnapshot,
+  GRAPH_BROADCAST_MAX,
+  loadRecentTraceEvents,
+  startTraceDaemon
+} from "./server.js";
 
 let tempDir: string | undefined;
 
@@ -478,6 +484,146 @@ describe("trace daemon", () => {
       await daemon.close();
     }
   });
+
+  it("sends only what is new after the first frame, naming the event it follows", async () => {
+    // Re-sending the whole store on every event cost a 50.6MB frame and a ~960ms rebuild
+    // per event on a real 30k store — one open dashboard pinned a core.
+    tempDir = await mkdtemp(join(tmpdir(), "agent-blackbox-daemon-"));
+    const daemon = await startTraceDaemon({ projectDir: tempDir, port: 0 });
+    const socket = new WebSocket(`ws://127.0.0.1:${daemon.port}/stream`);
+    const post = async (seq: number) => {
+      const event = createTraceEvent(seq, {
+        host: "opencode",
+        runId: "run-delta",
+        sessionId: "s",
+        kind: "file_read",
+        payload: { path: `src/f${seq}.ts`, chars: 10 }
+      });
+      const response = await fetch(`http://127.0.0.1:${daemon.port}/events`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(event)
+      });
+      expect(response.status).toBe(202);
+      return event;
+    };
+    try {
+      await nextSocketMessage(socket); // the snapshot every client opens with
+
+      const first = await post(1);
+      const opening = await nextSocketMessage(socket);
+      expect(opening.type).toBe("snapshot"); // no cursor yet — start the stream from a whole store
+
+      const second = await post(2);
+      const delta = (await nextSocketMessage(socket)) as unknown as {
+        type: string;
+        fromEventId: string;
+        cap: number;
+        events: { id: string }[];
+        graph?: unknown;
+      };
+      expect(delta.type).toBe("append");
+      expect(delta.fromEventId).toBe(first.id);
+      expect(delta.events.map((e) => e.id)).toEqual([second.id]);
+      expect(delta.cap).toBeGreaterThan(0); // the client trims to the daemon's window
+      expect(delta.graph).toBeUndefined(); // a delta never carries a whole-store graph
+
+      const third = await post(3);
+      const next = (await nextSocketMessage(socket)) as unknown as {
+        type: string;
+        fromEventId: string;
+        events: { id: string }[];
+      };
+      expect(next.type).toBe("append");
+      expect(next.fromEventId).toBe(second.id);
+      expect(next.events.map((e) => e.id)).toEqual([third.id]);
+    } finally {
+      socket.close();
+      await daemon.close();
+    }
+  });
+
+  it("starts the stream where the connecting client already is, not by repeating the store", async () => {
+    // The opening frame used to be a second whole snapshot, because the cursor only
+    // learned where clients were on the first broadcast — 20.5MB repeated on a real store.
+    tempDir = await mkdtemp(join(tmpdir(), "abb-seed-"));
+    const eventsFile = join(tempDir, "events.ndjson");
+    const seeded = createTraceEvent(1, {
+      host: "opencode",
+      runId: "run-seed",
+      sessionId: "s",
+      kind: "file_read",
+      payload: { path: "src/seed.ts", chars: 10 }
+    });
+    await writeFile(eventsFile, `${JSON.stringify(seeded)}\n`, "utf8");
+
+    const daemon = await startTraceDaemon({ projectDir: tempDir, eventsFile, port: 0 });
+    const socket = new WebSocket(`ws://127.0.0.1:${daemon.port}/stream`);
+    try {
+      const initial = await nextSocketMessage(socket);
+      expect(initial.type).toBe("snapshot");
+      expect(initial.data.events).toHaveLength(1);
+
+      const next = createTraceEvent(2, {
+        host: "opencode",
+        runId: "run-seed",
+        sessionId: "s",
+        kind: "file_read",
+        payload: { path: "src/next.ts", chars: 10 }
+      });
+      await fetch(`http://127.0.0.1:${daemon.port}/events`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(next)
+      });
+
+      const update = (await nextSocketMessage(socket)) as unknown as { type: string; fromEventId: string };
+      expect(update.type).toBe("append"); // not a repeat of the store
+      expect(update.fromEventId).toBe(seeded.id);
+    } finally {
+      socket.close();
+      await daemon.close();
+    }
+  });
+
+  it("stops building a whole-store graph for live frames once the store is large, but never for REST", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "abb-graph-"));
+    const eventsFile = join(tempDir, "events.ndjson");
+    const line = (seq: number) =>
+      JSON.stringify(
+        createTraceEvent(seq, {
+          host: "claude-code",
+          runId: "r",
+          sessionId: "r",
+          kind: "file_read",
+          payload: { path: `f${seq}.ts`, chars: 1 }
+        })
+      );
+
+    const small = Array.from({ length: 10 }, (_, i) => line(i + 1)).join("\n");
+    await writeFile(eventsFile, `${small}\n`, "utf8");
+    // Below the threshold nothing changes: a first session still gets a server-built
+    // graph on its very first paint.
+    expect((await buildTraceSnapshot(eventsFile, {}, { live: true })).graph).not.toBeNull();
+
+    const big = Array.from({ length: GRAPH_BROADCAST_MAX + 1 }, (_, i) => line(i + 1)).join("\n");
+    await writeFile(eventsFile, `${big}\n`, "utf8");
+    const live = await buildTraceSnapshot(eventsFile, {}, { live: true });
+    expect(live.graph).toBeNull(); // the dashboard rebuilds this per viewed run anyway
+    expect(live.handoffMarkdown).toBe(""); // and regenerates the handoff with it
+    expect(live.events.length).toBe(GRAPH_BROADCAST_MAX + 1); // the events still all ship
+    expect(live.efficiency).toBeDefined(); // the cheap analysis still does
+
+    // REST is the API surface other tools read — it always carries the whole thing.
+    const rest = await buildTraceSnapshot(eventsFile);
+    expect(rest.graph?.nodes.length).toBeGreaterThan(0);
+    expect(rest.handoffMarkdown).not.toBe("");
+
+    // A replay is a narrowed view, so it must materialize regardless of size.
+    const replay = await buildTraceSnapshot(eventsFile, { seq: 5 }, { live: true });
+    expect(replay.graph).not.toBeNull();
+  });
+
 });
 
 function nextSocketMessage(socket: WebSocket): Promise<{ type: string; data: { events: unknown[]; graph?: unknown } }> {

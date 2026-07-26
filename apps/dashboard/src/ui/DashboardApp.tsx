@@ -88,7 +88,9 @@ type ApiResponse<T> = {
 
 type TraceSnapshot = {
   events: TraceEvent[];
-  graph: WorkflowGraph;
+  // null on a live frame for a large store — the daemon stops building a whole-store
+  // graph the moment we would rebuild it per viewed run anyway (see the `graph` memo).
+  graph: WorkflowGraph | null;
   checks: PromiseCheck[];
   baselines?: RunSummary[]; // optional — older daemons don't send it
   rulePacks?: Record<string, RulePack>; // optional — custom checks keyed by project (cwd basename)
@@ -106,12 +108,26 @@ type StreamMessage =
       data: TraceSnapshot;
     }
   | {
+      // Only what happened since the last frame. The daemon used to re-send the whole
+      // store on every event — 50.6MB and a ~960ms rebuild per event on a 30k store.
+      type: "append";
+      fromEventId: string;
+      cap: number;
+      events: TraceEvent[];
+      baselines?: RunSummary[];
+      rulePacks?: Record<string, RulePack>;
+    }
+  | {
       type: "error";
       error: { message: string };
     };
 
 export function DashboardApp() {
   const [snapshot, setSnapshot] = useState<TraceSnapshot | null>(null);
+  // The stream effect splices deltas onto what we hold, and its closure would otherwise
+  // read whatever snapshot existed when it was set up.
+  const snapshotRef = useRef<TraceSnapshot | null>(null);
+  snapshotRef.current = snapshot;
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
   const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
@@ -177,6 +193,31 @@ export function DashboardApp() {
       }
     }
 
+    // Splice a delta onto what we already hold. The frame names the event it follows;
+    // if we don't have that one we have a hole, so re-read the whole snapshot instead of
+    // rendering a store with a gap in it. Ids we already hold are dropped, because a
+    // client that connected mid-stream gets a snapshot that overlaps the next delta.
+    const applyAppend = (frame: Extract<StreamMessage, { type: "append" }>): void => {
+      const base = latest ?? snapshotRef.current;
+      if (!base) return; // no baseline yet — the snapshot that starts us is still coming
+      const known = new Set(base.events.map((event) => event.id));
+      if (!known.has(frame.fromEventId)) {
+        void loadSnapshot();
+        return;
+      }
+      const fresh = frame.events.filter((event) => !known.has(event.id));
+      if (fresh.length === 0) return;
+      scheduleApply({
+        ...base,
+        events: [...base.events, ...fresh].slice(-frame.cap),
+        ...(frame.baselines ? { baselines: frame.baselines } : {}),
+        ...(frame.rulePacks ? { rulePacks: frame.rulePacks } : {}),
+        // Ours is now stale by exactly these events; the memo below rebuilds it for the
+        // run being viewed, which is smaller than the whole store the daemon was building.
+        graph: null
+      });
+    };
+
     void loadSnapshot();
     if (selectedSeq === null && typeof WebSocket !== "undefined") {
       socket = new WebSocket(toStreamUrl(daemonUrl));
@@ -186,6 +227,8 @@ export function DashboardApp() {
           const payload = JSON.parse(message.data as string) as StreamMessage;
           if (payload.type === "snapshot") {
             scheduleApply(payload.data);
+          } else if (payload.type === "append") {
+            applyAppend(payload);
           } else {
             setError(payload.error.message);
           }
@@ -194,7 +237,11 @@ export function DashboardApp() {
         }
       };
     }
+    // A safety net for a stream that died, not a data path: while the socket is open the
+    // stream already delivers every change, and polling re-ran the daemon's whole
+    // snapshot build every 5s whether or not anything had happened.
     const interval = window.setInterval(() => {
+      if (socket && socket.readyState === WebSocket.OPEN) return;
       void loadSnapshot();
     }, selectedSeq === null ? 5000 : 1500);
     return () => {
