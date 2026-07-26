@@ -51,4 +51,24 @@ describe("efficiency memory", () => {
     const applied = upsertManagedBlock(original, block);
     expect(removeManagedBlock(applied)).toBe(original);
   });
+
+  // The block interpolates content from the run — verified commands are whole
+  // command lines the user ran. One carrying our own end marker used to be written
+  // through verbatim, and removeManagedBlock matches up to the FIRST end marker, so
+  // revert stripped only part of the block and stranded an orphaned marker in the
+  // user's file — which hasManagedBlock no longer matches, so it could never be
+  // cleaned up again.
+  it("defuses our own markers appearing in run content, so revert still restores exactly", () => {
+    const block = buildEfficiencyMemory(wastefulReport(), {
+      verifiedCommands: [`echo "${EFFICIENCY_MEMORY_END}"`, `grep -r "${EFFICIENCY_MEMORY_START}" .`]
+    })!;
+    // Exactly one live marker of each kind: the wrapper's.
+    expect(block.split(EFFICIENCY_MEMORY_START).length - 1).toBe(1);
+    expect(block.split(EFFICIENCY_MEMORY_END).length - 1).toBe(1);
+    // The command is still shown, just quoted.
+    expect(block).toContain("(quoted)");
+
+    const original = "# My Project\n\nStable instructions.\n";
+    expect(removeManagedBlock(upsertManagedBlock(original, block))).toBe(original);
+  });
 });

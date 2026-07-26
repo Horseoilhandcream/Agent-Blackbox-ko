@@ -102,7 +102,29 @@ export function renderMemoryBlock(levers: MemoryLevers, headerNote: string): str
   }
 
   if (lines.length === 0) return null;
-  return [EFFICIENCY_MEMORY_START, "## Context-efficiency notes", `<!-- ${headerNote} -->`, "", ...lines, EFFICIENCY_MEMORY_END].join("\n");
+  return [
+    EFFICIENCY_MEMORY_START,
+    "## Context-efficiency notes",
+    `<!-- ${headerNote} -->`,
+    "",
+    ...lines.map(neutralizeMarkers),
+    EFFICIENCY_MEMORY_END
+  ].join("\n");
+}
+
+// The body interpolates content taken from the run — `verifiedCommands` are whole
+// command lines the user actually ran. If one of those contained our END marker it
+// would be written into the block verbatim, and removeManagedBlock (which matches up
+// to the FIRST end marker) would then strip only part of the block, stranding an
+// orphaned marker in the user's own AGENTS.md/CLAUDE.md. hasManagedBlock no longer
+// matches that leftover, so the tool could never clean it up again. Defuse the
+// marker text before it reaches the file; the wrapper markers stay untouched.
+function neutralizeMarkers(line: string): string {
+  return line
+    .split(EFFICIENCY_MEMORY_START)
+    .join("<!-- agent-blackbox:efficiency:start (quoted) -->")
+    .split(EFFICIENCY_MEMORY_END)
+    .join("<!-- agent-blackbox:efficiency:end (quoted) -->");
 }
 
 export function buildEfficiencyMemory(report: EfficiencyReport, options: EfficiencyMemoryOptions = {}): string | null {
