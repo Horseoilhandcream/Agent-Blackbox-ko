@@ -130,12 +130,15 @@ type TokenSnapshot = {
 // event — so old traces re-read correctly and no metric has to know where it came from.
 //   claude-code: input_tokens + cache_read + cache_creation      → whole prompt
 //   codex:       usage.input_tokens, cached_input_tokens ⊂ it    → whole prompt
-//   opencode/gjc: AI-SDK inputTokens, cache read reported apart  → uncached only
+//   gjc:         input_tokens + cache_read + cache_creation      → whole prompt
+//   opencode:    AI-SDK inputTokens, cache read reported apart   → uncached only
+// Each entry is asserted against the adapter that produces it in the host coverage
+// table (apps/daemon/src/hostCoverage.test.ts) — guessing here is how this broke.
 const INPUT_IS_WHOLE_PROMPT: Partial<Record<TraceEvent["host"], boolean>> = {
   "claude-code": true,
   codex: true,
-  opencode: false,
-  gjc: false
+  gjc: true,
+  opencode: false
 };
 
 function canonicalizeTokens(

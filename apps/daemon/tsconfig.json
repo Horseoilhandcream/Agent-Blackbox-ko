@@ -10,7 +10,8 @@
     { "path": "../../packages/storage" },
     { "path": "../../packages/claude-code-adapter" },
     { "path": "../../packages/codex-adapter" },
-    { "path": "../../packages/gjc-adapter" }
+    { "path": "../../packages/gjc-adapter" },
+    { "path": "../../packages/opencode-adapter" }
   ],
   "include": ["src/**/*.ts", "src/**/*.test.ts"]
 }
