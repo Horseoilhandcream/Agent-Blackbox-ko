@@ -8,7 +8,8 @@ import {
   filterWorkflowStepsBySeq,
   layoutGraphNodes,
   summarizeGraph,
-  visibleEventsForGraph
+  visibleEventsForGraph,
+  type WorkflowStep
 } from "./graphLayout.js";
 
 const graph: WorkflowGraph = {
@@ -777,5 +778,57 @@ describe("dashboard graph helpers", () => {
     ];
     const steps = createWorkflowSteps(events);
     expect(steps.map((step) => step.title)).toContain("Prompt received");
+  });
+});
+
+// Lane ordering walks parents down from the root, so a lane that ends up as its own
+// parent silently drops out of the genealogy. That shape is reachable in normal use:
+// the tailer starts at the END of a transcript, so the spawn that opens a lane can be
+// the first one we ever see and can land on a step already attributed to that lane.
+describe("agent tree lane genealogy", () => {
+  const laneStep = (id: string, seq: number, agentLabel?: string, branchLabel?: string): WorkflowStep =>
+    ({
+      id,
+      eventId: `e${seq}`,
+      seq,
+      ts: `2026-01-01T00:00:0${seq}.000Z`,
+      kind: "context",
+      title: "t",
+      description: "d",
+      tone: "neutral",
+      tokens: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      branches: branchLabel
+        ? [
+            {
+              id: `b${seq}`,
+              eventId: `e${seq}`,
+              seq,
+              ts: `2026-01-01T00:00:0${seq}.000Z`,
+              kind: "agent",
+              label: branchLabel,
+              description: "d",
+              detail: "sub",
+              tone: "neutral"
+            }
+          ]
+        : [],
+      ...(agentLabel ? { agentLabel } : {})
+    }) as unknown as WorkflowStep;
+
+  it("never parents a lane to itself, so every lane stays reachable from the root", () => {
+    const layout = createAgentTreeLayout([laneStep("s1", 1), laneStep("s2", 2, "X", "X")]);
+    expect(layout.lanes.filter((lane) => lane.parentLaneId === lane.id)).toHaveLength(0);
+    const laneX = layout.lanes.find((lane) => lane.label === "X");
+    expect(laneX?.parentLaneId).toBe("root");
+  });
+
+  it("orders lanes without hanging when spawns cross between two lanes", () => {
+    const layout = createAgentTreeLayout([
+      laneStep("s1", 1),
+      laneStep("s2", 2, "A", "B"),
+      laneStep("s3", 3, "B", "A")
+    ]);
+    expect(layout.lanes.map((lane) => lane.id)).toContain("root");
+    expect(layout.lanes.filter((lane) => lane.parentLaneId === lane.id)).toHaveLength(0);
   });
 });

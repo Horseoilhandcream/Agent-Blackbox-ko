@@ -377,7 +377,13 @@ export function createAgentTreeLayout(steps: WorkflowStep[]): AgentTreeLayout {
       if (!branchLane.startBranch || branch.seq < branchLane.startBranch.seq) {
         branchLane.startBranch = branch;
         branchLane.anchorStepId = step.id;
-        branchLane.parentLaneId = step.agentLabel ? agentLaneId(step.agentLabel) : "root";
+        // A lane is never its own parent. The spawn that opens lane X can land on a
+        // step already attributed to X — the tailer starts at the end of a transcript
+        // by default, so X's real first spawn may predate what we ever saw. Ordering
+        // walks parents down from the root, so a self-parented lane drops out of the
+        // genealogy entirely (and any future recursive walk would not terminate).
+        const parentLaneId = step.agentLabel ? agentLaneId(step.agentLabel) : "root";
+        branchLane.parentLaneId = parentLaneId === branchLane.id ? "root" : parentLaneId;
       }
     }
   }
