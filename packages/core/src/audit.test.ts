@@ -127,4 +127,22 @@ describe("handoff markdown", () => {
     const markdown = generateHandoffMarkdown(materializeWorkflowGraph([ev("file_read", { path: "a.ts" })]), [], []);
     expect(markdown).toContain("Not captured in the recorded events");
   });
+
+  it("keeps one entry to one clipped line, whatever the command was", () => {
+    // A COMMAND node's label is the command itself, and a command can be a multi-line
+    // script. Capping the entry COUNT let eight of those run a section to 7,280
+    // characters over 102 lines on a real run.
+    const script = "nohup env PORT=8788 node serve.mjs > /tmp/log 2>&1 & disown\nsleep 1.5\nfor i in 1 2 3; do curl -s localhost:8788; done";
+    const events = [
+      ev("message", { properties: { role: "user", text: "Bring the server up" } }),
+      ...Array.from({ length: 20 }, () => ev("bash", { command: script, exitCode: 1 }))
+    ];
+    const markdown = generateHandoffMarkdown(materializeWorkflowGraph(events), [], events);
+
+    const entries = markdown.split("\n").filter((line) => line.startsWith("- "));
+    expect(entries.length).toBeGreaterThan(0);
+    for (const entry of entries) expect(entry.length).toBeLessThanOrEqual(130);
+    expect(markdown).not.toContain("\nsleep 1.5"); // the body never spills across lines
+    expect(markdown.length).toBeLessThan(1500);
+  });
 });

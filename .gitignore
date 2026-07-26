@@ -27,6 +27,8 @@ packages/*/src/*.js.map
 packages/*/src/*.d.ts.map
 apps/*/src/*.js
 apps/*/src/*.d.ts
+# …but this one is hand-written, not output (a trailing comment would be part of the pattern).
+!apps/dashboard/src/vite-env.d.ts
 *.tsbuildinfo
 .turbo/
 .vite/

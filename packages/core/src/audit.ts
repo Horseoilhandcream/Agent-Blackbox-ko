@@ -98,7 +98,9 @@ export function generateHandoffMarkdown(
   const decisions = graph.nodes.filter((node) => node.type === "DECISION");
   const failures = graph.nodes.filter((node) => node.status === "FAILED");
   const blockers = graph.nodes.filter((node) => node.type === "BLOCKER" || node.status === "BLOCKED");
-  const commands = graph.nodes.filter((node) => node.type === "COMMAND");
+  // A failed command has its own section below; listing it in both doubles the length
+  // of a run that failed a lot, which is exactly the run whose handoff must stay short.
+  const commands = graph.nodes.filter((node) => node.type === "COMMAND" && node.status !== "FAILED");
   const objective = firstUserPrompt(events);
 
   const section = (title: string, body: string | null): string[] => (body ? [`## ${title}`, body, ``] : []);
@@ -142,14 +144,26 @@ function renderFiles(files: WorkflowNode[], graph: WorkflowGraph): string | null
   const ranked = [...files].reverse().sort((a, b) => Number(changed.has(b.id)) - Number(changed.has(a.id)));
   const shown = ranked
     .slice(0, FILE_CAP)
-    .map((node) => `- ${node.label}${changed.has(node.id) ? " [changed]" : ""}`);
+    .map((node) => `- ${oneLine(node.label)}${changed.has(node.id) ? " [changed]" : ""}`);
   return [...shown, ...(files.length > FILE_CAP ? [`- …and ${files.length - FILE_CAP} more`] : [])].join("\n");
 }
 
 function renderNodeList(nodes: WorkflowNode[]): string | null {
   if (nodes.length === 0) return null;
-  const shown = nodes.slice(-NODE_CAP).map((node) => `- ${node.label} [${node.status}]`);
+  const shown = nodes.slice(-NODE_CAP).map((node) => `- ${oneLine(node.label)} [${node.status}]`);
   return [...shown, ...(nodes.length > NODE_CAP ? [`- …and ${nodes.length - NODE_CAP} earlier`] : [])].join("\n");
+}
+
+// Capping the number of entries is not enough on its own: a COMMAND node's label is
+// the command, and a command can be a whole multi-line shell script. Eight of those
+// ran a "Failed Attempts" section to 7,280 characters over 102 lines on a real run.
+// What a continuation needs is which command failed, not its body — so each entry is
+// one line, clipped.
+const LABEL_MAX = 110;
+
+function oneLine(label: string): string {
+  const flat = label.replace(/\s+/g, " ").trim();
+  return flat.length > LABEL_MAX ? `${flat.slice(0, LABEL_MAX - 1)}…` : flat;
 }
 
 function stringPayload(event: TraceEvent, key: string): string | undefined {
