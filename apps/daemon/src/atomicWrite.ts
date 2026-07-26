@@ -15,6 +15,9 @@ import { dirname } from "node:path";
  */
 export async function writeFileAtomic(path: string, content: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
+  // The temp name is scoped by pid, so two processes never collide. Two concurrent
+  // writers to the same path INSIDE one process would, so callers that can overlap
+  // serialize first (optimize.ts chains per path; baselineStore throttles).
   const tmp = `${path}.${process.pid}.tmp`;
   try {
     const handle = await open(tmp, "w");

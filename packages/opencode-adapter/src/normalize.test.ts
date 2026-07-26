@@ -248,6 +248,38 @@ describe("OpenCode event normalization", () => {
     expect(edit.payload.lines).toBe(2);
   });
 
+  // Sizes must be measured BEFORE redaction. Redaction truncates every string to
+  // 4000 chars, so measuring the redacted payload capped every size at the
+  // truncation limit — a 200k read reported ~4k, flattening read-amplification,
+  // big-file-read, redundant-read reclaim, and the estimated token total. The test
+  // above never caught it because its content sits under that limit.
+  it("measures content larger than the redaction truncation limit at its true size", () => {
+    const huge = "s3cret-line\n".repeat(20_000); // 240k chars, far past the 4000-char cap
+    const read = normalizeToolAfter(
+      { tool: "read", sessionID: "s", args: { filePath: "/repo/huge.ts" } },
+      { output: huge, metadata: { display: { path: "/repo/huge.ts" } } },
+      { runId: "r", seq: 1, defaultSessionId: "s", projectDir: "/repo" }
+    );
+    expect(read.payload.chars).toBe(huge.length);
+    expect(read.payload.lines).toBe(20_001);
+    // …and the true size is reported without the content ever being stored.
+    expect(JSON.stringify(read.payload)).not.toContain("s3cret-line");
+
+    const bash = normalizeToolAfter(
+      { tool: "bash", sessionID: "s", args: { command: "grep -r x ." } },
+      { metadata: { output: huge, exit: 0 } },
+      { runId: "r", seq: 2, defaultSessionId: "s" }
+    );
+    expect(bash.payload.outputChars).toBe(huge.length);
+
+    const wrote = normalizeToolAfter(
+      { tool: "write", sessionID: "s", args: { filePath: "/repo/huge-out.ts", content: huge } },
+      {},
+      { runId: "r", seq: 3, defaultSessionId: "s", projectDir: "/repo" }
+    );
+    expect(wrote.payload.chars).toBe(huge.length);
+  });
+
   it("promotes a completed skill tool to a named tool_result event", () => {
     const event = normalizeToolAfter(
       {

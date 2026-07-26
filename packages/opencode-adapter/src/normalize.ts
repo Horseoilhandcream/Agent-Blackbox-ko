@@ -268,16 +268,15 @@ export function normalizeToolAfter(
   context: OpenCodeNormalizerContext
 ): TraceEvent {
   const tool = readString(input, ["tool", "name"]) ?? readString(output, ["tool", "name"]) ?? "unknown-tool";
-  const payload = normalizePayload(
-    {
-      phase: "after",
-      tool,
-      input,
-      output
-    },
-    context
-  );
-  const observed = deriveObservedToolResult(tool, payload.value);
+  // Sanitize once, then keep BOTH views. Redaction truncates every string to
+  // maxStringLength, so measuring the redacted payload reported a 200k-char file
+  // read as ~4k — capping every size at the truncation limit and silently
+  // flattening the metrics built on it (read-amplification, big-file-read,
+  // redundant-read reclaim, the estimated token total). Sizes are measured on the
+  // raw view; every string that gets STORED still comes from the redacted one.
+  const raw = toJsonObject({ phase: "after", tool, input, output });
+  const payload = redactSanitizedPayload(raw, context);
+  const observed = deriveObservedToolResult(tool, payload.value, raw);
   const traceInput: TraceEventInput = {
     host: "opencode",
     runId: context.runId,
@@ -307,15 +306,24 @@ export function normalizeToolAfter(
   return createTraceEvent(context.seq, traceInput);
 }
 
+/**
+ * Turn a tool.after hook into the observed event we store.
+ *
+ * `payload` is the redacted view — every string read out of it is safe to persist.
+ * `raw` is the same object before redaction and is used ONLY to measure sizes, so
+ * a large read/output isn't reported as the truncation limit. Nothing from `raw`
+ * is ever stored, only counts derived from it.
+ */
 function deriveObservedToolResult(
   tool: string,
-  payload: JsonObject
+  payload: JsonObject,
+  raw: JsonObject
 ): { kind: TraceEventKind; summary: string; payload: JsonObject } | undefined {
   if (tool === "read") {
     const path =
       readString(payload, ["input.args.filePath", "output.metadata.display.path"]) ??
       readString(payload, ["output.title"]);
-    const size = measureContent(payload, ["output.output", "output.content", "output.metadata.preview"]);
+    const size = measureContent(raw, ["output.output", "output.content", "output.metadata.preview"]);
     const observedPayload = compactJsonObject({
       tool,
       source: "tool.after",
@@ -337,7 +345,7 @@ function deriveObservedToolResult(
     const command = readString(payload, ["input.args.command", "output.metadata.command"]);
     const exitCode = readNumber(payload, ["output.metadata.exit", "output.metadata.exitCode"]);
     const outputPreview = shortenOptional(readString(payload, ["output.metadata.output", "output.output"]), 1200);
-    const size = measureContent(payload, ["output.metadata.output", "output.output"]);
+    const size = measureContent(raw, ["output.metadata.output", "output.output"]);
     const observedPayload = compactJsonObject({
       tool,
       source: "tool.after",
@@ -358,7 +366,7 @@ function deriveObservedToolResult(
 
   if (tool === "edit" || tool === "write" || tool === "patch") {
     const path = readString(payload, ["input.args.filePath", "input.args.path", "output.metadata.path"]);
-    const size = measureContent(payload, [
+    const size = measureContent(raw, [
       "input.args.content",
       "input.args.newString",
       "input.args.replacement",
@@ -399,7 +407,7 @@ function deriveObservedToolResult(
 
   if (tool === "skill") {
     const name = readString(payload, ["input.args.name", "output.args.name"]);
-    const size = measureContent(payload, ["output.output", "output.content"]);
+    const size = measureContent(raw, ["output.output", "output.content"]);
     return {
       kind: "tool_result",
       summary: name ? `Used the ${name} skill` : "Used a skill",
@@ -417,7 +425,7 @@ function deriveObservedToolResult(
 
   // Any other tool (grep, glob, list, webfetch, todowrite, a command, …) is
   // still a real action — keep it as a renderable result instead of dropping it.
-  const size = measureContent(payload, ["output.output", "output.content", "output.metadata.output"]);
+  const size = measureContent(raw, ["output.output", "output.content", "output.metadata.output"]);
   return {
     kind: "tool_result",
     summary: `Used ${tool}`,
@@ -459,7 +467,14 @@ function readMessageText(...records: UnknownRecord[]): string | undefined {
 }
 
 function normalizePayload(value: unknown, context: OpenCodeNormalizerContext) {
-  return redactJsonObject(toJsonObject(value), {
+  return redactSanitizedPayload(toJsonObject(value), context);
+}
+
+// Redaction only — for callers that already sanitized and want to keep the raw
+// view around (see normalizeToolAfter). redactJsonObject builds new containers
+// rather than mutating, so the raw object stays intact and untruncated.
+function redactSanitizedPayload(value: JsonObject, context: OpenCodeNormalizerContext) {
+  return redactJsonObject(value, {
     ...(context.homeDir ? { homeDir: context.homeDir } : {}),
     ...(context.projectDir ? { projectDir: context.projectDir } : {}),
     maxStringLength: 4000
