@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runCodexHook } from "./hook-entry.js";
+import { codexHookStateDir, runCodexHook } from "./hook-entry.js";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -39,5 +39,26 @@ describe("Codex optimizer hook runtime", () => {
     });
     runCodexHook("PreCompact", input);
     expect(runCodexHook("PreToolUse", input)).toBeUndefined();
+  });
+
+  // Every hook invocation is a NEW process, so the state directory has to be scoped
+  // to something stable per USER. A per-process scope (a pid) would hand each
+  // invocation its own empty state and silently disable read-dedup and the working
+  // set — and it would only show up on Windows, which has no getuid().
+  it("scopes hook state per user, never per process", () => {
+    const dir = codexHookStateDir();
+    expect(dir).toBe(codexHookStateDir());
+    expect(dir).not.toContain(String(process.pid));
+
+    const realGetuid = process.getuid;
+    try {
+      // Simulate Windows, where process.getuid is absent.
+      delete (process as { getuid?: unknown }).getuid;
+      const windowsDir = codexHookStateDir();
+      expect(windowsDir).toBe(codexHookStateDir());
+      expect(windowsDir).not.toContain(String(process.pid));
+    } finally {
+      if (realGetuid) (process as { getuid?: unknown }).getuid = realGetuid;
+    }
   });
 });

@@ -2,7 +2,7 @@
 // Best-effort Codex optimizer hook. It never records content and never fails a
 // Codex run: any parse/I/O problem exits successfully with no output.
 import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -149,6 +149,20 @@ function absolute(path: string, cwd: string | undefined): string {
   return isAbsolute(path) ? path : resolve(cwd ?? process.cwd(), path);
 }
 
+// A stable per-user scope for the state directory. MUST be stable: a hook is a new
+// process on every invocation, so anything per-process (a pid) would hand each
+// invocation its own empty state and silently disable the actuator.
+function userScope(): string {
+  if (typeof process.getuid === "function") return String(process.getuid());
+  try {
+    // Windows has no getuid. Its os.tmpdir() is already per-user, so this is mostly
+    // belt-and-braces — but it has to stay the same across invocations.
+    return userInfo().username.replace(/[^A-Za-z0-9_-]/g, "_") || "user";
+  } catch {
+    return "user";
+  }
+}
+
 function stateDir(): string {
   // Codex command hooks execute under the active sandbox. Its temporary root
   // is writable even when ~/.local is not, and this state only needs to live
@@ -157,9 +171,13 @@ function stateDir(): string {
   // Scope the directory to the current user: on Linux os.tmpdir() is the SHARED
   // /tmp, so a fixed name lets any other local account pre-create the path and
   // plant (or read) session state — which we feed straight back into the model's
-  // context. A uid suffix plus 0700 keeps it ours.
-  const uid = typeof process.getuid === "function" ? process.getuid() : process.pid;
-  return join(tmpdir(), `agent-blackbox-${uid}`, "codex-hooks");
+  // context. The user scope plus 0700 keeps it ours.
+  return join(tmpdir(), `agent-blackbox-${userScope()}`, "codex-hooks");
+}
+
+/** Exposed for tests: this path has to be identical in every hook process. */
+export function codexHookStateDir(): string {
+  return stateDir();
 }
 
 function statePath(sessionId: string): string {

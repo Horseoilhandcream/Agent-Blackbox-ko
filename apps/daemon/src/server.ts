@@ -519,7 +519,10 @@ function makeBroadcastScheduler(clients: Set<WebSocket>, eventsFile: string, del
     timer = setTimeout(() => {
       timer = null;
       building = true;
-      void broadcastSnapshot(clients, eventsFile).finally(() => {
+      // Fire-and-forget, so it must never reject: an unhandled rejection tears down
+      // the whole daemon on modern Node. The build itself is already guarded inside
+      // broadcastSnapshot; this covers the fan-out and anything added later.
+      void broadcastSnapshot(clients, eventsFile).catch(() => undefined).finally(() => {
         building = false;
         if (pending) {
           pending = false;
