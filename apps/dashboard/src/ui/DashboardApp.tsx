@@ -40,6 +40,7 @@ import {
   type WorkflowStep
 } from "../graphLayout.js";
 import { fileNameFromPath, normalizedProjectPath, pathSegments } from "../filePath.js";
+import { localizeMetricLabel, localizeObservedText, text, type Locale } from "../i18n.js";
 import { filterEventsForRun, latestRunId, listRuns } from "../runSelection.js";
 
 declare global {
@@ -142,6 +143,11 @@ export function DashboardApp() {
     if (saved === "light" || saved === "dark") return saved;
     return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
   });
+  const [locale, setLocale] = useState<Locale>(() => {
+    if (typeof window === "undefined") return "ko";
+    const saved = window.localStorage.getItem("abb-locale");
+    return saved === "en" || saved === "ko" ? saved : "ko";
+  });
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -151,6 +157,15 @@ export function DashboardApp() {
       // Private-mode storage failures are non-fatal — the theme still applies.
     }
   }, [theme]);
+
+  useEffect(() => {
+    document.documentElement.lang = locale;
+    try {
+      window.localStorage.setItem("abb-locale", locale);
+    } catch {
+      // Private-mode storage failures are non-fatal — the locale still applies.
+    }
+  }, [locale]);
 
   useEffect(() => {
     let active = true;
@@ -291,7 +306,15 @@ export function DashboardApp() {
   const agentNodes = graph?.nodes.filter(isRuntimeAgentNode) ?? [];
   const selectedAgent = agentNodes.find((agent) => agent.id === selectedAgentId) ?? null;
   const selectedAgentLabel = selectedAgent?.label ?? null;
-  const workflowSteps = useMemo(() => createWorkflowSteps(visibleEvents), [visibleEvents]);
+  const workflowSteps = useMemo(
+    () =>
+      createWorkflowSteps(visibleEvents).map((step) => ({
+        ...step,
+        title: localizeObservedText(step.title, locale),
+        description: localizeObservedText(step.description, locale)
+      })),
+    [locale, visibleEvents]
+  );
   const tokenTotals = useMemo(() => latestTokenUsage(visibleEvents), [visibleEvents]);
   const efficiency = useMemo(() => computeEfficiencyReport(visibleEvents), [visibleEvents]);
   // Promise-checks scan message text with regexes — compute once and share between
@@ -393,7 +416,10 @@ export function DashboardApp() {
     [graph, promiseChecks]
   );
   const orderedEvents = useMemo(() => [...visibleEvents].sort((a, b) => a.seq - b.seq), [visibleEvents]);
-  const marks = useMemo(() => createTimelineMarks(orderedEvents), [orderedEvents]);
+  const marks = useMemo(
+    () => createTimelineMarks(orderedEvents).map((mark) => ({ ...mark, label: localizeObservedText(mark.label, locale) })),
+    [locale, orderedEvents]
+  );
   const maxSeq = orderedEvents.at(-1)?.seq ?? 0;
   const replaySeq = selectedSeq ?? maxSeq;
   const replaySteps = useMemo(() => filterWorkflowStepsBySeq(workflowSteps, replaySeq), [workflowSteps, replaySeq]);
@@ -587,12 +613,12 @@ export function DashboardApp() {
         <div className="topbarStatus">
           {runOptions.length > 1 ? (
             <select
-              aria-label="Select run"
+              aria-label={text(locale, "selectRun")}
               className="runPicker"
               onChange={(event) => chooseRun(event.target.value || null)}
               value={selectedRunId && runOptions.some((run) => run.runId === selectedRunId) ? selectedRunId : ""}
             >
-              <option value="">Latest run (auto)</option>
+              <option value="">{text(locale, "latestRun")}</option>
               {runOptions.map((run) => (
                 <option key={run.runId} value={run.runId}>
                   {run.label} · {hostDisplayName(run.host)} · {run.eventCount} ev
@@ -606,7 +632,7 @@ export function DashboardApp() {
             <span className="statusDot" aria-hidden="true" />
             {runStatus}
           </span>
-          <span className="statusChip">{visibleEvents.length} events</span>
+          <span className="statusChip">{visibleEvents.length} {text(locale, "events")}</span>
           {riskMomentCount > 0 ? (
             <button
               className="statusChip risk"
@@ -622,10 +648,19 @@ export function DashboardApp() {
           ) : null}
           <button
             className="themeToggle"
+            onClick={() => setLocale((current) => (current === "ko" ? "en" : "ko"))}
+            type="button"
+            aria-label={text(locale, "language")}
+            title={text(locale, "language")}
+          >
+            {locale === "ko" ? "EN" : "KO"}
+          </button>
+          <button
+            className="themeToggle"
             onClick={() => setTheme((current) => (current === "dark" ? "light" : "dark"))}
             type="button"
-            aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
-            title={theme === "dark" ? "Light mode" : "Dark mode"}
+            aria-label={theme === "dark" ? text(locale, "switchLight") : text(locale, "switchDark")}
+            title={theme === "dark" ? text(locale, "lightMode") : text(locale, "darkMode")}
           >
             {theme === "dark" ? (
               // Sun — switch to light. Inline SVG so it renders identically on every
@@ -650,7 +685,7 @@ export function DashboardApp() {
             }}
             type="button"
           >
-            Handoff
+            {text(locale, "handoff")}
           </button>
         </div>
       </header>
@@ -663,9 +698,9 @@ export function DashboardApp() {
           }}
           role="presentation"
         >
-          <aside className="handoffPanel" aria-label="Handoff summary">
+          <aside className="handoffPanel" aria-label={text(locale, "handoffSummary")}>
             <div className="handoffHeader">
-              <h2>Handoff summary</h2>
+              <h2>{text(locale, "handoffSummary")}</h2>
               <div className="handoffActions">
                 <button
                   onClick={() => {
@@ -676,10 +711,10 @@ export function DashboardApp() {
                   }}
                   type="button"
                 >
-                  {handoffCopied ? "Copied" : "Copy markdown"}
+                  {handoffCopied ? text(locale, "copied") : text(locale, "copyMarkdown")}
                 </button>
                 <button onClick={() => setShowHandoff(false)} type="button">
-                  Close
+                  {text(locale, "close")}
                 </button>
               </div>
             </div>
@@ -714,9 +749,9 @@ export function DashboardApp() {
             })}
           </g>
         </svg>
-        <aside className="lanes" aria-label="Agent lanes">
-          <h2>Agents</h2>
-          {agentNodes.length === 0 ? <p className="muted">No agent lanes yet.</p> : null}
+        <aside className="lanes" aria-label={text(locale, "agents")}>
+          <h2>{text(locale, "agents")}</h2>
+          {agentNodes.length === 0 ? <p className="muted">{text(locale, "noAgentLanes")}</p> : null}
           {agentNodes.map((agent) => (
             <button
               className={agent.id === selectedAgentId ? "lane active" : "lane"}
@@ -758,6 +793,7 @@ export function DashboardApp() {
           selectedFilePath={selectedFilePath}
           selectedStep={selectedStep}
           steps={replaySteps}
+          locale={locale}
         />
 
         <aside className="copilot" aria-label="Context efficiency and files">
@@ -778,6 +814,7 @@ export function DashboardApp() {
               setMetricHighlight((current) => ({ ids: metric.evidenceEventIds, nonce: current.nonce + 1 }))
             }
             memoryFile={memoryFile}
+            locale={locale}
           />
           <FileStructure
             hasFocus={filesHasFocus}
@@ -788,11 +825,12 @@ export function DashboardApp() {
             selectedEventId={selectedEventId}
             selectedFilePath={selectedFilePath}
             selectedStepId={filesFocusedStepId}
+            locale={locale}
           />
         </aside>
       </section>
 
-      <footer className="timelineBar" aria-label="Replay timeline">
+      <footer className="timelineBar" aria-label={text(locale, "replayTimeline")}>
         <div className="ticks">
           {marks.slice(-160).map((mark) => (
             <button
@@ -811,10 +849,10 @@ export function DashboardApp() {
             onClick={() => setSelectedSeq(null)}
             type="button"
           >
-            {selectedSeq === null ? "● Live" : "Go live"}
+            {selectedSeq === null ? `● ${text(locale, "live")}` : text(locale, "goLive")}
           </button>
           <input
-            aria-label="Replay sequence"
+            aria-label={text(locale, "replaySequence")}
             className="timelineRange"
             max={maxSeq}
             min={0}
@@ -823,7 +861,7 @@ export function DashboardApp() {
             value={replaySeq}
           />
           <span className="timelineLabel">
-            {selectedSeq === null ? "live" : `seq ${replaySeq}`} / {maxSeq}
+            {selectedSeq === null ? text(locale, "live") : `seq ${replaySeq}`} / {maxSeq}
           </span>
         </div>
       </footer>
@@ -845,7 +883,8 @@ function SessionMap({
   selectedEventId,
   selectedFilePath,
   selectedStep,
-  steps
+  steps,
+  locale
 }: {
   agentNodes: WorkflowNode[];
   events: TraceEvent[];
@@ -861,6 +900,7 @@ function SessionMap({
   selectedFilePath: string | null;
   selectedStep: WorkflowStep | null;
   steps: WorkflowStep[];
+  locale: Locale;
 }) {
   const mapRef = useRef<HTMLDivElement | null>(null);
   const movedRef = useRef(false);
@@ -1482,30 +1522,30 @@ function SessionMap({
   };
 
   return (
-    <section className="sessionMap" aria-label="Session workflow map">
+    <section className="sessionMap" aria-label={text(locale, "sessionMap")}>
       <div className="workflowHeader">
         <div>
-          <h2>Session Map</h2>
-          <p>Main actions form the trunk. Agents fork into branches, then reconnect through files and decisions.</p>
+          <h2>{text(locale, "sessionMap")}</h2>
+          <p>{locale === "ko" ? "주요 작업은 중심 흐름을 이루고, 에이전트는 분기된 뒤 파일과 의사결정을 통해 다시 연결됩니다." : "Main actions form the trunk. Agents fork into branches, then reconnect through files and decisions."}</p>
         </div>
         <div className="workflowTools">
-          <span>{steps.length} moments · {Math.max(0, treeLayout.lanes.length - 1)} branches</span>
-          <div className="zoomControls" role="group" aria-label="Zoom the session map">
+          <span>{steps.length} {locale === "ko" ? "작업 시점" : "moments"} · {Math.max(0, treeLayout.lanes.length - 1)} {locale === "ko" ? "분기" : "branches"}</span>
+          <div className="zoomControls" role="group" aria-label={text(locale, "sessionMap")}>
             <button
               onClick={() => zoomBy(1 / USER_ZOOM_STEP)}
               type="button"
-              aria-label="Zoom out"
+              aria-label={text(locale, "zoomOut")}
               disabled={userZoom <= USER_ZOOM_MIN + 0.001}
             >
               −
             </button>
-            <button onClick={resetView} type="button" aria-label="Reset zoom" title="Reset zoom (100% = fit)">
+            <button onClick={resetView} type="button" aria-label={text(locale, "resetZoom")} title={text(locale, "resetZoom")}>
               {Math.round(userZoom * 100)}%
             </button>
             <button
               onClick={() => zoomBy(USER_ZOOM_STEP)}
               type="button"
-              aria-label="Zoom in"
+              aria-label={text(locale, "zoomIn")}
               disabled={userZoom >= USER_ZOOM_MAX - 0.001}
             >
               +
@@ -1523,10 +1563,10 @@ function SessionMap({
             }
           >
             <span className="traceDot" aria-hidden="true" />
-            Tracing
+            {text(locale, "tracing")}
           </button>
           <button onClick={resetLayout} type="button">
-            Auto layout
+            {text(locale, "autoLayout")}
           </button>
         </div>
       </div>
@@ -1897,7 +1937,8 @@ function FileStructure({
   selectedAgentLabel,
   selectedEventId,
   selectedFilePath,
-  selectedStepId
+  selectedStepId,
+  locale
 }: {
   hasFocus: boolean;
   onResizeStart?: (clientX: number) => void;
@@ -1908,6 +1949,7 @@ function FileStructure({
   selectedEventId: string | null;
   selectedFilePath: string | null;
   selectedStepId: string | null;
+  locale: Locale;
 }) {
   const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(() => new Set());
   const visibleRows = useMemo(() => visibleFileRows(rows, collapsedFolders), [rows, collapsedFolders]);
@@ -1932,10 +1974,10 @@ function FileStructure({
   };
 
   return (
-    <aside className={`fileStructure ${hasFocus ? "hasFocus" : ""}`} aria-label="Connected file structure">
+    <aside className={`fileStructure ${hasFocus ? "hasFocus" : ""}`} aria-label={text(locale, "files")}>
       {onResizeStart ? (
         <button
-          aria-label="Resize file list"
+          aria-label={text(locale, "files")}
           className="resizeHandle"
           onPointerDown={(event) => {
             event.preventDefault();
@@ -1950,13 +1992,13 @@ function FileStructure({
         <span />
       </div>
       <div className="fileHeader">
-        <h2>Files</h2>
-        <span>{itemCount} items</span>
+        <h2>{text(locale, "files")}</h2>
+        <span>{itemCount} {locale === "ko" ? "개 항목" : "items"}</span>
       </div>
       <div className="finderColumns" aria-hidden="true">
-        <span>Name</span>
-        <span>Links</span>
-        <span>Last</span>
+        <span>{locale === "ko" ? "이름" : "Name"}</span>
+        <span>{locale === "ko" ? "연결" : "Links"}</span>
+        <span>{locale === "ko" ? "최근" : "Last"}</span>
       </div>
       <div className="fileAnchorRail" aria-hidden="true">
         {fileAnchors.map((row, index) => {
@@ -2477,16 +2519,23 @@ function aggregatedStepDescription(step: WorkflowStep): string {
 // When consecutive identical moments are aggregated into one node, surface the
 // count in the title so "Created a file" x6 reads as "Created 6 files".
 function stepDisplayTitle(step: WorkflowStep, fileCount: number): string {
-  if (step.kind === "context" && step.title.startsWith("Read") && fileCount > 1) {
-    return `Read ${fileCount} files`;
+  const korean = step.title.startsWith("파일");
+  if (step.kind === "context" && (step.title.startsWith("Read") || step.title.startsWith("파일 읽기")) && fileCount > 1) {
+    return korean ? `${fileCount}개 파일 읽기` : `Read ${fileCount} files`;
   }
   if (step.kind === "change" && fileCount > 1) {
-    const verb = step.title.startsWith("Created")
-      ? "Created"
-      : step.title.startsWith("Deleted")
-        ? "Deleted"
-        : "Changed";
-    return `${verb} ${fileCount} files`;
+    const verb = korean
+      ? step.title.startsWith("파일 생성")
+        ? "파일 생성"
+        : step.title.startsWith("파일 삭제")
+          ? "파일 삭제"
+          : "파일 수정"
+      : step.title.startsWith("Created")
+        ? "Created"
+        : step.title.startsWith("Deleted")
+          ? "Deleted"
+          : "Changed";
+    return korean ? `${verb}: ${fileCount}개 파일` : `${verb} ${fileCount} files`;
   }
   if (step.kind === "verification" || step.kind === "risk") {
     const runs = step.branches.filter((branch) => branch.kind === "verification").length;
@@ -2567,7 +2616,8 @@ function ContextPanel({
   onRequestAi,
   onOptimize,
   onSelectMetric,
-  memoryFile
+  memoryFile,
+  locale
 }: {
   report: EfficiencyReport;
   effectiveness: EffectivenessReport;
@@ -2583,6 +2633,7 @@ function ContextPanel({
   onOptimize: () => void;
   onSelectMetric: (metric: EfficiencyMetric) => void;
   memoryFile: string;
+  locale: Locale;
 }) {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [tokensOpen, setTokensOpen] = useState(false);
@@ -2594,19 +2645,19 @@ function ContextPanel({
     .sort((a, b) => (a.severity === b.severity ? 0 : a.severity === "bad" ? -1 : 1))
     .slice(0, 2);
   const tokenRows: [string, number][] = [
-    ["input", usage.input],
-    ["output", usage.output],
-    ["reasoning", usage.reasoning],
-    ["cache read", usage.cacheRead],
-    ["cache write", usage.cacheWrite]
+    [text(locale, "input"), usage.input],
+    [text(locale, "output"), usage.output],
+    [text(locale, "reasoning"), usage.reasoning],
+    [text(locale, "cacheRead"), usage.cacheRead],
+    [text(locale, "cacheWrite"), usage.cacheWrite]
   ];
   return (
-    <section className="contextPanel" aria-label="Context efficiency">
+    <section className="contextPanel" aria-label={text(locale, "contextEfficiency")}>
       <div className="contextHead">
         <strong className={`contextScoreBig status-${report.status}`}>{report.overallScore}</strong>
         <div className="contextHeadMeta">
           <h2>
-            Context efficiency
+            {text(locale, "contextEfficiency")}
             {report.archetype && report.archetype !== "unknown" && report.archetypeConfidence >= 0.55 ? (
               <span
                 className="contextArchetype"
@@ -2647,8 +2698,8 @@ function ContextPanel({
 
       <div className="contextAi">
         <button className="optimizeButton" type="button" onClick={onOptimize} disabled={fixCount === 0}>
-          <span className="optimizeButtonLabel">Optimize future runs</span>
-          <span className="optimizeButtonHint">Write a reversible memory to {memoryFile} →</span>
+          <span className="optimizeButtonLabel">{text(locale, "optimize")}</span>
+          <span className="optimizeButtonHint">{locale === "ko" ? `${memoryFile}에 되돌릴 수 있는 규칙 쓰기 →` : `Write a reversible memory to ${memoryFile} →`}</span>
         </button>
         <button
           className="contextAiButton"
@@ -2656,7 +2707,7 @@ function ContextPanel({
           onClick={adviceRequested ? onRequestAi : onRequestAdvice}
           disabled={aiLoading || fixCount === 0}
         >
-          {aiLoading ? "Sharpening…" : adviceRequested ? "Re-run suggestions" : "Generate advice"}
+          {aiLoading ? (locale === "ko" ? "개선안 다듬는 중…" : "Sharpening…") : adviceRequested ? (locale === "ko" ? "개선안 다시 생성" : "Re-run suggestions") : text(locale, "generateAdvice")}
         </button>
         {adviceRequested && aiProvider ? (
           <span className="contextAiNote">
@@ -2669,7 +2720,7 @@ function ContextPanel({
 
       {ruleFindings.length > 0 ? (
         <div className="contextRules" aria-label="Custom rule checks">
-          <p className="contextRulesLabel">Custom checks</p>
+          <p className="contextRulesLabel">{text(locale, "customChecks")}</p>
           {ruleFindings.map((finding) => (
             <div
               className={`contextRule severity-${finding.severity}`}
@@ -2709,7 +2760,7 @@ function ContextPanel({
             ))}
           </div>
         ) : (
-          <p className="contextAllClear">No waste detected — this run used its context economically.</p>
+          <p className="contextAllClear">{localizeObservedText("No waste detected — this run used its context economically.", locale)}</p>
         )
       ) : null}
 
@@ -2731,7 +2782,7 @@ function ContextPanel({
                 aria-expanded={suggestion ? expanded : undefined}
               >
                 <span className="contextMetricTop">
-                  <span className="contextMetricLabel">{metric.label}</span>
+                  <span className="contextMetricLabel">{localizeMetricLabel(metric.label, locale)}</span>
                   <span className="contextMetricValue">{metric.display}</span>
                 </span>
                 <span className="contextBar">
@@ -2755,7 +2806,7 @@ function ContextPanel({
         onClick={() => setTokensOpen((open) => !open)}
         aria-expanded={tokensOpen}
       >
-        <span>tokens</span>
+        <span>{text(locale, "tokens")}</span>
         <span className="contextTokensTotal">{formatTokenNumber(usage.total)} {tokensOpen ? "▾" : "▸"}</span>
       </button>
       {tokensOpen ? (
