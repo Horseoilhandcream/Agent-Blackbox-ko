@@ -24,6 +24,15 @@
   <img src="https://img.shields.io/badge/API%20key%20불필요-000000?style=flat-square&labelColor=000000&color=000000" alt="No API key">
 </p>
 
+> 이 포크는 대시보드를 기본 한국어로 표시하며, 상단 `EN` 버튼으로 영어로 전환할 수 있습니다. 원본 NPM 패키지(`@taewooopark/agent-blackbox`)는 이 UI 변경을 포함하지 않으므로, 이 포크는 아래처럼 소스에서 실행하세요.
+>
+> ```bash
+> git clone https://github.com/Horseoilhandcream/Agent-Blackbox-ko.git
+> cd Agent-Blackbox-ko
+> npm ci && npm run build
+> npm run up -- --host codex
+> ```
+
 Agent-Blackbox는 **코딩 에이전트를 위한 로컬 우선(local-first) 플라이트 레코더이자 컨텍스트 효율 프로파일러**입니다. 모든 에이전트 실행을 **실시간으로 보고 되감아 볼 수 있는 작업 그래프**로 바꿉니다 — 에이전트가 무엇을 읽고, 바꾸고, 실행하고, 결정하고, 위임하고, 어디서 막혔고, 무엇을 검증했는지를 에이전트 자신의 요약이 아니라 **실제로 관측된 이벤트**로 재구성합니다. 그리고 그 실행을 **두 축**으로 채점합니다 — 컨텍스트 윈도를 얼마나 경제적으로 썼는지, *그리고* 태스크가 실제로 착지했는지 — **태스크 유형**(리서치/디버그/운영…)과 **당신의 과거 런**에 맞춘 잣대로 판단하고, 다음 실행을 더 싸고 빠르게 만들 방법을 구체적으로 알려줍니다.
 
 **[Claude Code](https://www.claude.com/product/claude-code), [Codex](https://developers.openai.com/codex/), [OpenCode](https://opencode.ai)에서 동작합니다** — 같은 레코더, 같은 맵, 같은 효율 점수. 하나만, 혹은 전부 한꺼번에 기록하세요.
